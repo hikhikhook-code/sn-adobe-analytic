@@ -6,29 +6,12 @@
 
 import Papa from "papaparse";
 
-/**
- * Canonical fields we recognize. The order is preserved when we render the
- * column-mapping table, so put the most "important" fields first.
- */
-export const IMPORT_FIELDS = [
-  "id",
-  "title",
-  "downloads",
-  "performanceScore",
-  "downloadsPerMonth",
-  "contentType",
-  "categories",
-  "uploadDate",
-  "contributorName",
-  "contributorId",
-  "keywords",
-  "adobeStockUrl",
-  "thumbnailUrl",
-  "isPremium",
-  "isAiGenerated",
-] as const;
-
-export type ImportField = (typeof IMPORT_FIELDS)[number];
+// The canonical field list lives in a side-effect-free module so client
+// components can import it without pulling papaparse into the client bundle.
+// We re-export the same names here so existing server-side importers
+// (`@/lib/import/csv`) continue to work.
+export { IMPORT_FIELDS, type ImportField } from "./fields";
+import type { ImportField } from "./fields";
 
 /**
  * Aliases the auto-mapper considers when matching CSV headers → canonical

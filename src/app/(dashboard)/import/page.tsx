@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   AlertTriangle,
   CheckCircle2,
-  FileUp,
   Loader2,
   Trash2,
   Upload,
@@ -27,12 +26,15 @@ import { Label } from "@/components/ui/label";
 import { SimpleSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataQualityBadge, DataQualityBanner } from "@/components/ui/data-quality";
+import { CsvUploader } from "@/components/import/csv-uploader";
 import { formatNumber, timeAgo } from "@/lib/utils";
 
-import {
-  IMPORT_FIELDS,
-  type ImportField,
-} from "@/lib/import/csv";
+// NOTE: We import from "@/lib/import/fields" (papaparse-free) rather than
+// "@/lib/import/csv", so this client bundle stays lean and doesn't pull any
+// Node-only code paths into the browser. The server-only helpers
+// (parseCsvForPreview, normalizeRows) still live in @/lib/import/csv and are
+// re-exported for the API routes that need them.
+import { IMPORT_FIELDS, type ImportField } from "@/lib/import/fields";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -74,8 +76,6 @@ export default function ImportPage() {
   const [datasets, setDatasets] = useState<DatasetRow[] | null>(null);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
   // Load existing datasets on mount.
   useEffect(() => {
     void loadDatasets();
@@ -109,7 +109,14 @@ export default function ImportPage() {
       );
       return;
     }
-    if (!file.name.toLowerCase().endsWith(".csv")) {
+    // Browsers don't always set a `.csv` MIME type, so we rely on the
+    // extension. Accept both ".csv" explicitly and a text/csv MIME as a
+    // belt-and-braces fallback.
+    const looksLikeCsv =
+      file.name.toLowerCase().endsWith(".csv") ||
+      file.type === "text/csv" ||
+      file.type === "application/vnd.ms-excel";
+    if (!looksLikeCsv) {
       setError("Only .csv files are supported in this MVP.");
       return;
     }
@@ -184,7 +191,6 @@ export default function ImportPage() {
       setFileSizeBytes(0);
       setPreview(null);
       setMapping({});
-      if (fileInputRef.current) fileInputRef.current.value = "";
       await loadDatasets();
       // Nudge other pages to refetch by triggering router refresh.
       router.refresh();
@@ -263,46 +269,14 @@ export default function ImportPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="csv-file">CSV file</Label>
-                <div className="flex flex-col gap-2 rounded-xl border-2 border-dashed border-border bg-muted/30 p-6 text-center sm:flex-row sm:items-center sm:justify-between sm:text-left">
-                  <div className="flex items-center gap-3">
-                    <FileUp className="h-6 w-6 text-muted-foreground" />
-                    <div>
-                      <p className="text-sm font-medium">
-                        {fileName ?? "No file selected"}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {fileSizeBytes
-                          ? `${(fileSizeBytes / 1024).toFixed(1)} KB`
-                          : "Drag a CSV here or click choose file"}
-                      </p>
-                    </div>
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    id="csv-file"
-                    type="file"
-                    accept=".csv,text/csv"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void handleFile(f);
-                    }}
-                  />
-                  <Button
-                    variant="accent"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={previewing || submitting}
-                  >
-                    {previewing ? (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin" /> Parsing&hellip;
-                      </>
-                    ) : (
-                      <>Choose file</>
-                    )}
-                  </Button>
-                </div>
+                <Label>CSV file</Label>
+                <CsvUploader
+                  fileName={fileName}
+                  fileSizeBytes={fileSizeBytes}
+                  busy={previewing}
+                  disabled={submitting}
+                  onFile={handleFile}
+                />
               </div>
 
               {error ? (
