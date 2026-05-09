@@ -13,6 +13,7 @@ import { RecentSearches } from "@/components/search/recent-searches";
 import { useRecentSearches } from "@/hooks/use-recent-searches";
 import { useFavorites } from "@/hooks/use-favorites";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DataQualityBanner } from "@/components/ui/data-quality";
 import type {
   AiFilter,
   ContentType,
@@ -202,12 +203,18 @@ function SearchPageInner() {
 
         {data && (
           <>
+            <DataQualityBanner
+              level={data.dataQuality}
+              providerName={data.providerName}
+            />
+
             <ResultsSummary
               totalResults={data.totalResults}
               keyword={keyword}
               competitionLevel={data.competitionLevel}
               aiSaturation={data.aiSaturation}
               contentBreakdown={data.contentBreakdown}
+              dataQuality={data.dataQuality}
             />
 
             <ResultsToolbar
@@ -229,6 +236,7 @@ function SearchPageInner() {
                   onToggleFavorite={toggleFavorite}
                   selected={selected.has(asset.id)}
                   onToggleSelected={toggleSelected}
+                  dataQuality={data.dataQuality}
                 />
               ))}
             </div>
@@ -242,12 +250,20 @@ function SearchPageInner() {
         )}
 
         {!loading && !data && !error && (
-          <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center text-muted-foreground">
-            <p className="text-sm">
-              Try a keyword like <span className="font-medium text-foreground">business</span>,{" "}
-              <span className="font-medium text-foreground">nature</span>, or{" "}
-              <span className="font-medium text-foreground">ai illustration</span>.
-            </p>
+          <div className="space-y-4">
+            <DataQualityBanner
+              level="demo"
+              providerName="Mock data provider"
+              message="Search results are generated for demo purposes. Numbers shown for downloads, performance score, and competition do not reflect real Adobe Stock metrics."
+            />
+            <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center text-muted-foreground">
+              <p className="text-sm">
+                Try a demo keyword like{" "}
+                <span className="font-medium text-foreground">business</span>,{" "}
+                <span className="font-medium text-foreground">nature</span>, or{" "}
+                <span className="font-medium text-foreground">ai illustration</span>.
+              </p>
+            </div>
           </div>
         )}
       </div>

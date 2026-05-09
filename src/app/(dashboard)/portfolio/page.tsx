@@ -10,26 +10,32 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ResultCard } from "@/components/search/result-card";
 import { formatNumber, formatDate } from "@/lib/utils";
-import type { MockContributor } from "@/lib/mock-data";
+import { Skeleton } from "@/components/ui/skeleton";
+import { DataQualityBanner, DataQualityBadge } from "@/components/ui/data-quality";
+import type { ProviderContributorResult } from "@/lib/providers/types";
 
 export default function PortfolioPage() {
   const [query, setQuery] = useState("");
-  const [data, setData] = useState<MockContributor | null>(null);
+  const [data, setData] = useState<ProviderContributorResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!query.trim()) return;
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch("/api/portfolio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),
       });
-      if (!res.ok) throw new Error("Lookup failed");
-      const json: MockContributor = await res.json();
+      if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
+      const json: ProviderContributorResult = await res.json();
       setData(json);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
     }
@@ -66,15 +72,48 @@ export default function PortfolioPage() {
           </Button>
         </form>
 
-        {!data && !loading && (
-          <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center text-sm text-muted-foreground">
-            Enter a contributor to see their stats, top assets, content breakdown,
-            and most-used keywords.
+        {error && (
+          <div className="rounded-md bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
+        )}
+
+        {!data && !loading && !error && (
+          <div className="space-y-4">
+            <DataQualityBanner
+              level="demo"
+              providerName="Mock data provider"
+              message="Portfolio numbers shown here are generated demo data. They are not real contributor stats."
+            />
+            <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center text-sm text-muted-foreground">
+              Enter a contributor to see their demo stats, top assets, content
+              breakdown, and most-used keywords.
+            </div>
+          </div>
+        )}
+
+        {loading && !data && (
+          <div className="space-y-4">
+            <Skeleton className="h-28 w-full" />
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <Skeleton className="h-56 w-full" />
+              <Skeleton className="h-56 w-full" />
+            </div>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="h-72 w-full" />
+              ))}
+            </div>
           </div>
         )}
 
         {data && (
           <div className="space-y-6">
+            <DataQualityBanner
+              level={data.dataQuality}
+              providerName={data.providerName}
+            />
+
             <Card>
               <CardHeader className="flex-row items-center justify-between gap-4 sm:flex">
                 <div>
@@ -83,23 +122,35 @@ export default function PortfolioPage() {
                     Joined {formatDate(data.joinDate)} · {formatNumber(data.totalAssets)} assets
                   </CardDescription>
                 </div>
-                <Badge variant="accent">Demo data</Badge>
+                <DataQualityBadge level={data.dataQuality} size="md" />
               </CardHeader>
               <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <div>
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Total downloads</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Total downloads</p>
+                    <DataQualityBadge level={data.dataQuality} size="xs" />
+                  </div>
                   <p className="mt-1 text-xl font-semibold">{formatNumber(data.totalDownloads)}</p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Avg per asset</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Avg per asset</p>
+                    <DataQualityBadge level="estimated" size="xs" />
+                  </div>
                   <p className="mt-1 text-xl font-semibold">{formatNumber(data.avgDownloads)}</p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Total assets</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Total assets</p>
+                    <DataQualityBadge level={data.dataQuality} size="xs" />
+                  </div>
                   <p className="mt-1 text-xl font-semibold">{formatNumber(data.totalAssets)}</p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Best asset</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Best asset</p>
+                    <DataQualityBadge level={data.dataQuality} size="xs" />
+                  </div>
                   <p className="mt-1 truncate text-sm font-semibold" title={data.bestAsset.title}>
                     {data.bestAsset.title}
                   </p>
@@ -112,9 +163,12 @@ export default function PortfolioPage() {
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <Card>
-                <CardHeader>
-                  <CardTitle>Content breakdown</CardTitle>
-                  <CardDescription>Asset mix by type</CardDescription>
+                <CardHeader className="flex-row items-start justify-between gap-2">
+                  <div>
+                    <CardTitle>Content breakdown</CardTitle>
+                    <CardDescription>Asset mix by type</CardDescription>
+                  </div>
+                  <DataQualityBadge level={data.dataQuality} size="sm" />
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {data.contentBreakdown.map((b) => (
@@ -137,9 +191,12 @@ export default function PortfolioPage() {
               </Card>
 
               <Card>
-                <CardHeader>
-                  <CardTitle>Top keywords</CardTitle>
-                  <CardDescription>Most-used keywords across portfolio</CardDescription>
+                <CardHeader className="flex-row items-start justify-between gap-2">
+                  <div>
+                    <CardTitle>Top keywords</CardTitle>
+                    <CardDescription>Most-used keywords across portfolio</CardDescription>
+                  </div>
+                  <DataQualityBadge level={data.dataQuality} size="sm" />
                 </CardHeader>
                 <CardContent>
                   <div className="flex flex-wrap gap-1.5">
@@ -154,12 +211,15 @@ export default function PortfolioPage() {
             </div>
 
             <div>
-              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                Best sellers
-              </h2>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                  Best sellers
+                </h2>
+                <DataQualityBadge level={data.dataQuality} size="sm" />
+              </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {data.assets.slice(0, 9).map((a) => (
-                  <ResultCard key={a.id} asset={a} />
+                  <ResultCard key={a.id} asset={a} dataQuality={data.dataQuality} />
                 ))}
               </div>
             </div>

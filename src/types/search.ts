@@ -16,6 +16,8 @@ export type SortMode =
 
 export type AiFilter = "all" | "ai_only" | "exclude_ai";
 
+export type DataQuality = "demo" | "estimated" | "public_metadata" | "verified";
+
 export interface SearchAsset {
   id: string;
   thumbnailUrl: string;
@@ -42,6 +44,8 @@ export interface SearchResponse {
   results: SearchAsset[];
   page: number;
   pageSize: number;
+  dataQuality: DataQuality;
+  providerName: string;
 }
 
 export interface SearchRequest {

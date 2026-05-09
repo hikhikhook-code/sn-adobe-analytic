@@ -1,6 +1,16 @@
 import { NextResponse } from "next/server";
-import { HEATMAP_NICHES } from "@/lib/mock-data";
+import { selectProvider, mockProvider } from "@/lib/providers";
+import { ProviderNotImplementedError } from "@/lib/providers/types";
 
 export async function GET() {
-  return NextResponse.json({ niches: HEATMAP_NICHES });
+  const provider = selectProvider();
+  try {
+    return NextResponse.json(await provider.heatmap());
+  } catch (err) {
+    if (err instanceof ProviderNotImplementedError) {
+      console.warn(`[providers] ${err.message}`);
+      return NextResponse.json(await mockProvider.heatmap());
+    }
+    throw err;
+  }
 }

@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import { Heart, Copy, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
-import type { SearchAsset } from "@/types/search";
+import type { DataQuality, SearchAsset } from "@/types/search";
 import { cn, formatNumber, formatDate, timeAgo } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DataQualityBadge } from "@/components/ui/data-quality";
 
 interface ResultCardProps {
   asset: SearchAsset;
@@ -14,6 +15,13 @@ interface ResultCardProps {
   onToggleFavorite?: (asset: SearchAsset) => void;
   selected?: boolean;
   onToggleSelected?: (id: string) => void;
+  /**
+   * Quality tier of the data shown in this card. Defaults to `demo` so any
+   * caller that hasn’t opted in still gets a clear label.
+   */
+  dataQuality?: DataQuality;
+  /** Quality tier of the performance score, which is always estimated. */
+  scoreQuality?: DataQuality;
 }
 
 export function ResultCard({
@@ -22,7 +30,11 @@ export function ResultCard({
   onToggleFavorite,
   selected,
   onToggleSelected,
+  dataQuality = "demo",
+  scoreQuality,
 }: ResultCardProps) {
+  const scoreLevel: DataQuality =
+    scoreQuality ?? (dataQuality === "verified" ? "estimated" : dataQuality);
   const [showAllKeywords, setShowAllKeywords] = useState(false);
   const [showAllTitle, setShowAllTitle] = useState(false);
 
@@ -124,17 +136,33 @@ export function ResultCard({
 
         <div className="grid grid-cols-2 gap-2">
           <div className="rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 p-3 text-white">
-            <p className="text-[10px] uppercase tracking-wide opacity-80">
-              Downloads
-            </p>
+            <div className="flex items-center justify-between gap-1">
+              <p className="text-[10px] uppercase tracking-wide opacity-80">
+                Downloads
+              </p>
+              <DataQualityBadge
+                level={dataQuality}
+                size="xs"
+                showLabel={false}
+                className="!border-white/40 !bg-white/15 !text-white"
+              />
+            </div>
             <p className="mt-0.5 text-lg font-bold leading-tight">
               {formatNumber(asset.downloads)}
             </p>
           </div>
           <div className="rounded-lg bg-gradient-to-br from-orange-500 to-rose-500 p-3 text-white">
-            <p className="text-[10px] uppercase tracking-wide opacity-80">
-              Performance
-            </p>
+            <div className="flex items-center justify-between gap-1">
+              <p className="text-[10px] uppercase tracking-wide opacity-80">
+                Performance
+              </p>
+              <DataQualityBadge
+                level={scoreLevel}
+                size="xs"
+                showLabel={false}
+                className="!border-white/40 !bg-white/15 !text-white"
+              />
+            </div>
             <p className="mt-0.5 text-lg font-bold leading-tight">
               {asset.performanceScore}
               <span className="text-xs font-normal opacity-80">/100</span>

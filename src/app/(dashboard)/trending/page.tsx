@@ -1,31 +1,111 @@
+"use client";
+
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { TrendingUp, ArrowRight } from "lucide-react";
 import { TopBar } from "@/components/layout/topbar";
 import { PageHeader } from "@/components/layout/page-header";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { HEATMAP_NICHES, TRENDING_KEYWORDS } from "@/lib/mock-data";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  DataQualityBadge,
+  DataQualityBanner,
+} from "@/components/ui/data-quality";
 import { formatNumber } from "@/lib/utils";
+import type {
+  ProviderHeatmapResult,
+  ProviderTrendingResult,
+} from "@/lib/providers/types";
 
 export default function TrendingPage() {
+  const [trending, setTrending] = useState<ProviderTrendingResult | null>(null);
+  const [heatmap, setHeatmap] = useState<ProviderHeatmapResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const [t, h] = await Promise.all([
+          fetch("/api/search/trending").then((r) => {
+            if (!r.ok) throw new Error(`Trending failed (${r.status})`);
+            return r.json() as Promise<ProviderTrendingResult>;
+          }),
+          fetch("/api/heatmap").then((r) => {
+            if (!r.ok) throw new Error(`Heat map failed (${r.status})`);
+            return r.json() as Promise<ProviderHeatmapResult>;
+          }),
+        ]);
+        if (!cancelled) {
+          setTrending(t);
+          setHeatmap(h);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Unknown error");
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const items = trending?.trending ?? [];
+  const niches = (heatmap?.niches ?? []).filter((n) => n.trend === "up");
+
   return (
     <>
-      <TopBar title="Trending" subtitle="Keyword & niche trends across Adobe Stock" />
+      <TopBar
+        title="Trending"
+        subtitle="Keyword & niche trends across Adobe Stock"
+      />
       <div className="space-y-6 p-6">
         <PageHeader
           title="Trending right now"
           description="Watch which keywords and niches are gaining momentum."
         />
 
+        <DataQualityBanner
+          level={trending?.dataQuality ?? "demo"}
+          providerName={trending?.providerName ?? "Mock data provider"}
+          message="Search-volume and growth percentages are synthetic demo signals. They do not reflect real Adobe Stock search trends."
+        />
+
+        {error && (
+          <div className="rounded-md bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Card>
-            <CardHeader>
-              <CardTitle>Trending keywords</CardTitle>
-              <CardDescription>Highest search-volume growth</CardDescription>
+            <CardHeader className="flex-row items-start justify-between gap-2">
+              <div>
+                <CardTitle>Trending keywords</CardTitle>
+                <CardDescription>Highest search-volume growth</CardDescription>
+              </div>
+              <DataQualityBadge level={trending?.dataQuality ?? "demo"} size="sm" />
             </CardHeader>
             <CardContent className="space-y-2">
-              {TRENDING_KEYWORDS.map((t, i) => (
+              {!trending && !error
+                ? Array.from({ length: 5 }).map((_, i) => (
+                    <Skeleton key={i} className="h-14 w-full" />
+                  ))
+                : null}
+              {trending && items.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-6 text-center text-xs text-muted-foreground">
+                  No trending keywords right now.
+                </p>
+              ) : null}
+              {items.map((t, i) => (
                 <div
                   key={t.keyword}
                   className="flex items-center justify-between gap-3 rounded-lg border border-border/40 bg-card p-3"
@@ -57,12 +137,25 @@ export default function TrendingPage() {
           </Card>
 
           <Card>
-            <CardHeader>
-              <CardTitle>Rising niches</CardTitle>
-              <CardDescription>Niches gaining demand week over week</CardDescription>
+            <CardHeader className="flex-row items-start justify-between gap-2">
+              <div>
+                <CardTitle>Rising niches</CardTitle>
+                <CardDescription>Niches gaining demand week over week</CardDescription>
+              </div>
+              <DataQualityBadge level={heatmap?.dataQuality ?? "demo"} size="sm" />
             </CardHeader>
             <CardContent className="space-y-2">
-              {HEATMAP_NICHES.filter((n) => n.trend === "up")
+              {!heatmap && !error
+                ? Array.from({ length: 5 }).map((_, i) => (
+                    <Skeleton key={i} className="h-14 w-full" />
+                  ))
+                : null}
+              {heatmap && niches.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-6 text-center text-xs text-muted-foreground">
+                  No rising niches right now.
+                </p>
+              ) : null}
+              {niches
                 .sort((a, b) => b.downloads - a.downloads)
                 .map((n, i) => (
                   <div

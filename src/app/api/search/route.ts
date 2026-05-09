@@ -53,8 +53,14 @@ export async function POST(req: Request) {
   }
 
   return NextResponse.json({
-    ...result,
+    totalResults: result.totalResults,
+    competitionLevel: result.competitionLevel,
+    aiSaturation: result.aiSaturation,
+    contentBreakdown: result.contentBreakdown,
+    results: result.results,
     page: data.page ?? 1,
     pageSize: result.results.length,
+    dataQuality: result.dataQuality,
+    providerName: result.providerName,
   });
 }

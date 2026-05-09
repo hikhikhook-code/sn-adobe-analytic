@@ -1,6 +1,16 @@
 import { NextResponse } from "next/server";
-import { TRENDING_KEYWORDS } from "@/lib/mock-data";
+import { selectProvider, mockProvider } from "@/lib/providers";
+import { ProviderNotImplementedError } from "@/lib/providers/types";
 
 export async function GET() {
-  return NextResponse.json({ trending: TRENDING_KEYWORDS });
+  const provider = selectProvider();
+  try {
+    return NextResponse.json(await provider.trending());
+  } catch (err) {
+    if (err instanceof ProviderNotImplementedError) {
+      console.warn(`[providers] ${err.message}`);
+      return NextResponse.json(await mockProvider.trending());
+    }
+    throw err;
+  }
 }
