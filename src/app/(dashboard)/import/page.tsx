@@ -3,9 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useSession } from "next-auth/react";
 import {
   AlertTriangle,
   CheckCircle2,
+  FileDown,
   Loader2,
   Trash2,
   Upload,
@@ -36,7 +38,14 @@ import { formatNumber, timeAgo } from "@/lib/utils";
 // re-exported for the API routes that need them.
 import { IMPORT_FIELDS, type ImportField } from "@/lib/import/fields";
 
+// Client-side soft limit to match the default `MAX_IMPORT_FILE_SIZE_MB=10`
+// in `.env.example`. The server re-validates against `env.maxImportFileSizeBytes`
+// (see src/lib/env.ts), so operators can raise the real ceiling without
+// needing a frontend redeploy — the UI will still bounce oversized files
+// early, just with the default limit in the error message.
 const MAX_BYTES = 10 * 1024 * 1024;
+const MAX_MB = 10;
+const SAMPLE_CSV_URL = "/samples/adobe-stock-sample.csv";
 
 interface PreviewResponse {
   headers: string[];
@@ -61,6 +70,16 @@ const MAPPING_OPTIONS = [
 
 export default function ImportPage() {
   const router = useRouter();
+  // Send guests to /auth/login with a callback that returns them here once
+  // they sign in. This replaces the older UX that let the page render fully
+  // and only surfaced a red "Sign in to import data" banner after the first
+  // API call returned 401.
+  const { status } = useSession();
+  useEffect(() => {
+    if (status === "unauthenticated") {
+      router.replace("/auth/login?callbackUrl=%2Fimport");
+    }
+  }, [status, router]);
 
   const [datasetName, setDatasetName] = useState("");
   const [csvText, setCsvText] = useState("");
@@ -76,17 +95,24 @@ export default function ImportPage() {
   const [datasets, setDatasets] = useState<DatasetRow[] | null>(null);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
 
-  // Load existing datasets on mount.
+  // Load existing datasets on mount — only if authenticated. Guests will be
+  // redirected away by the useSession effect above, so firing the fetch
+  // here would just cause a harmless 401 before the redirect lands.
   useEffect(() => {
+    if (status !== "authenticated") return;
     void loadDatasets();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   async function loadDatasets() {
     try {
       const res = await fetch("/api/import");
       if (res.status === 401) {
+        // Session expired between mount and this fetch — send the user back
+        // to login preserving their intent to return to /import.
         setDatasets([]);
-        setDatasetsError("Sign in to import data and view past datasets.");
+        setDatasetsError("Your session expired. Redirecting to sign in…");
+        router.replace("/auth/login?callbackUrl=%2Fimport");
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -103,9 +129,16 @@ export default function ImportPage() {
     if (!file) return;
     setError(null);
     setSuccess(null);
+    if (file.size === 0) {
+      setError(
+        "That file is empty. Export your analytics and try again.",
+      );
+      return;
+    }
     if (file.size > MAX_BYTES) {
       setError(
-        `That file is ${(file.size / 1024 / 1024).toFixed(1)}MB. Max accepted size is 10MB.`,
+        `That file is ${(file.size / 1024 / 1024).toFixed(1)}MB. ` +
+          `Max accepted size is ${MAX_MB}MB — trim the file or split it into batches.`,
       );
       return;
     }
@@ -117,7 +150,10 @@ export default function ImportPage() {
       file.type === "text/csv" ||
       file.type === "application/vnd.ms-excel";
     if (!looksLikeCsv) {
-      setError("Only .csv files are supported in this MVP.");
+      setError(
+        `Only .csv files are supported. You dropped "${file.name}" — ` +
+          `export your data as CSV and try again.`,
+      );
       return;
     }
     setFileName(file.name);
@@ -248,14 +284,33 @@ export default function ImportPage() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[2fr,1fr]">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Upload className="h-5 w-5 text-accent-blue" />
-                Upload CSV
-              </CardTitle>
-              <CardDescription>
-                Headers can be anything reasonable — we&rsquo;ll auto-suggest a
-                column mapping. Max 10MB.
-              </CardDescription>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1.5">
+                  <CardTitle className="flex items-center gap-2">
+                    <Upload className="h-5 w-5 text-accent-blue" />
+                    Upload CSV
+                  </CardTitle>
+                  <CardDescription>
+                    Headers can be anything reasonable — we&rsquo;ll auto-suggest
+                    a column mapping. Max {MAX_MB}MB.
+                  </CardDescription>
+                </div>
+                <Button asChild variant="outline" size="sm">
+                  {/*
+                    Link to a 12-row demo CSV in /public/samples. Served by
+                    Next.js as a static file so there's no extra route to
+                    maintain. The `download` attribute asks the browser to
+                    save it rather than render in-place.
+                  */}
+                  <a
+                    href={SAMPLE_CSV_URL}
+                    download="adobe-stock-sample.csv"
+                  >
+                    <FileDown className="h-4 w-4" />
+                    Download sample CSV
+                  </a>
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">

@@ -3,6 +3,7 @@ import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
+import { assertNextAuthSecret } from "@/lib/env";
 
 const providers: NextAuthOptions["providers"] = [
   CredentialsProvider({
@@ -59,5 +60,9 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  secret: process.env.NEXTAUTH_SECRET,
+  // `assertNextAuthSecret` throws in strict production runtime if the secret
+  // is missing, placeholder, CI-only, or too short. In dev / build phase it
+  // warns and returns a fallback so local setup and CI stay frictionless.
+  // See src/lib/env.ts for the full policy.
+  secret: assertNextAuthSecret(),
 };

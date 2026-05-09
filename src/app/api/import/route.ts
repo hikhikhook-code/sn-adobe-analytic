@@ -4,8 +4,12 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { IMPORT_FIELDS, normalizeRows, parseCsvForPreview } from "@/lib/import/csv";
+import { env } from "@/lib/env";
 
-const MAX_CSV_BYTES = 10 * 1024 * 1024;
+// Driven by MAX_IMPORT_FILE_SIZE_MB (see src/lib/env.ts). Default 10MB,
+// hard-capped at 100MB. Always re-validate server-side.
+const MAX_CSV_BYTES = env.maxImportFileSizeBytes;
+const MAX_CSV_MB = env.maxImportFileSizeMb;
 const ImportSchema = z.object({
   name: z.string().min(1).max(120),
   csv: z.string().min(1).max(MAX_CSV_BYTES),
@@ -57,12 +61,54 @@ export async function POST(req: Request) {
   }
   const parsed = ImportSchema.safeParse(body);
   if (!parsed.success) {
+    const sizeIssue = parsed.error.issues.find(
+      (i) => i.code === "too_big" && i.path.join(".") === "csv",
+    );
+    if (sizeIssue) {
+      return NextResponse.json(
+        {
+          error: `CSV exceeds the ${MAX_CSV_MB}MB limit. Trim the file or split it into batches before uploading.`,
+          code: "csv_too_large",
+          limitBytes: MAX_CSV_BYTES,
+          limitMb: MAX_CSV_MB,
+        },
+        { status: 413 },
+      );
+    }
+    const nameIssue = parsed.error.issues.find(
+      (i) => i.path.join(".") === "name",
+    );
+    if (nameIssue) {
+      return NextResponse.json(
+        {
+          error:
+            "Please give this dataset a name between 1 and 120 characters.",
+          code: "invalid_dataset_name",
+        },
+        { status: 400 },
+      );
+    }
     return NextResponse.json(
       { error: "Invalid input", issues: parsed.error.issues },
       { status: 400 },
     );
   }
   const { name, csv, mapping } = parsed.data;
+
+  // Reject an empty mapping early so the user sees a clear message rather
+  // than the generic "No usable rows" further down.
+  const anyFieldMapped = Object.values(mapping).some((v) => v !== null);
+  if (!anyFieldMapped) {
+    return NextResponse.json(
+      {
+        error:
+          "Map at least one CSV column to a recognized field before importing.",
+        code: "empty_mapping",
+      },
+      { status: 400 },
+    );
+  }
+
   // Re-parse with the user-confirmed mapping. We pass an effectively
   // unlimited previewSize so `previewRows` here actually contains every row
   // in the CSV — this is the dataset we persist.
@@ -72,7 +118,9 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         error:
-          "No usable rows found. Check the CSV file or column mapping and try again.",
+          "No usable rows found in that CSV. Check the column mapping, " +
+          "confirm the file has data rows, and try again.",
+        code: "no_usable_rows",
         issues: errors,
       },
       { status: 400 },

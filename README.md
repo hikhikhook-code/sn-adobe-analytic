@@ -33,14 +33,28 @@ niche heat maps, and export results to CSV.
   - Production-safe live-scraper guardrails
   - Vercel deploy + SQLite → Supabase Postgres migration guide
   - UX polish (empty / loading / error states, mobile sidebar drawer)
-- **Phase 3 (this PR)** — Manual import + user-owned data + export history:
+- **Phase 3** — Manual import + user-owned data + export history:
   - Real `manualImportProvider` reading user-uploaded CSVs from the database
   - `/import` page: upload → preview → column mapping → confirm → success
   - Imported data automatically takes over Search / Dashboard / Portfolio /
     Heat Map / Trending / Saved / Export for the signed-in user (zero-config)
   - Persisted search history surfaced on the dashboard
   - Completed `/export` with history table + per-export quality tagging
-- **Phase 3+** (still deferred) — official Adobe data source, similar-image
+- **Phase 4 (this PR)** — Supabase / Postgres + Vercel deploy readiness:
+  - Centralized env loading & validation in `src/lib/env.ts` (strict in
+    production, permissive in local dev and during CI builds)
+  - `docs/DEPLOYMENT.md` — end-to-end Vercel + Supabase deploy guide with
+    a 7-section post-deploy QA checklist and troubleshooting section
+  - Auth UX polish: friendlier "email already registered" + "wrong
+    credentials" flows with cross-links between login/register
+  - Guest access to `/import` now redirects cleanly to
+    `/auth/login?callbackUrl=%2Fimport`
+  - `/import` serves a downloadable sample CSV and surfaces specific
+    upload error messages; `/api/import*` size cap is driven by
+    `MAX_IMPORT_FILE_SIZE_MB`
+  - `/export` history table gains an "Actions" column with a clearly
+    disabled "Download again" button (re-download is deferred)
+- **Phase 4+** (still deferred) — official Adobe data source, similar-image
   search, pricing flow.
 
 ## Tech stack
@@ -75,72 +89,76 @@ The app redirects `/` to `/search`. Try keywords like `business`, `nature`, or
 `ai illustration`. All numbers come from `mockProvider`
 (`src/lib/providers/mock.ts`) and are clearly labeled `Demo Data` in the UI.
 
-## Vercel Deployment
+## Vercel deployment
 
 > **Do not rely on SQLite when deploying to Vercel.** Vercel functions run on
 > ephemeral filesystems — a SQLite file there will be lost between requests
 > and between deploys. Use a managed Postgres (e.g. Supabase) for any
 > deployed environment.
 
-### 1. Provision a Postgres database
+For the full end-to-end walkthrough — creating the Supabase project, grabbing
+the pooled connection URL, migrating the Prisma schema, setting Vercel env
+vars, running the first `prisma db push`, and the post-deploy QA checklist —
+see **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
-Create a Supabase project and grab the **pooled** connection string (not the
-direct connection — Vercel's serverless functions need pgBouncer).
+The 30-second version:
 
-```
-DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1
-```
+1. Create a Supabase project, copy the **pooled** (pgBouncer, port `6543`)
+   connection string, and add `?pgbouncer=true&connection_limit=1`.
+2. In `prisma/schema.prisma`, switch `provider = "sqlite"` → `"postgresql"`
+   on your deploy branch. (Leave `main` on SQLite so local dev stays easy;
+   see `DEPLOYMENT.md §5` for the two migration strategies.)
+3. Set the env vars listed in [`.env.example`](.env.example) on Vercel,
+   especially `DATABASE_URL`, `NEXTAUTH_URL`, and `NEXTAUTH_SECRET`
+   (`openssl rand -base64 32`).
+4. Deploy, then run `npx prisma db push` once against the pooled URL.
+5. Walk through the QA checklist below.
 
-### 2. Switch Prisma to `postgresql`
+### Env validation
 
-See [*Migrating SQLite → Supabase Postgres*](#migrating-sqlite--supabase-postgres)
-below for the schema changes.
+`src/lib/env.ts` centralizes env handling:
 
-### 3. Set Vercel env vars
+- **Local dev / CI build**: missing `DATABASE_URL` falls back to
+  `file:./dev.db` with a warning; missing `NEXTAUTH_SECRET` uses a dev-only
+  fallback.
+- **Production runtime**: missing `DATABASE_URL`, missing
+  `NEXTAUTH_SECRET`, the `.env.example` placeholder, a CI-only secret
+  (anything ending `-not-used-at-runtime`), or a secret shorter than
+  16 characters all cause the app to **refuse to start** with a descriptive
+  error pointing at `docs/DEPLOYMENT.md`.
+- `USE_LIVE_SCRAPER` is always forced off in production regardless of the
+  env value.
 
-In the Vercel project → **Settings → Environment Variables**, set:
+See `docs/DEPLOYMENT.md §10` for what each error message means and how to fix it.
 
-| Variable | Required | Example / notes |
-| --- | --- | --- |
-| `DATABASE_URL` | yes | Supabase pooled URL (see step 1) |
-| `NEXTAUTH_URL` | yes | `https://<your-deployment>.vercel.app` (use the prod domain in production, the preview domain in preview) |
-| `NEXTAUTH_SECRET` | yes | `openssl rand -base64 32` |
-| `DATA_PROVIDER` | no | Defaults to `mock`. `official` and `manual` are placeholders that fall back to mock. |
-| `USE_LIVE_SCRAPER` | no | Always ignored in production. Leave unset / `false`. |
-| `GOOGLE_CLIENT_ID` | no | Only if Google sign-in is enabled |
-| `GOOGLE_CLIENT_SECRET` | no | Only if Google sign-in is enabled |
+## Manual QA checklist
 
-### 4. Run migrations on first deploy
+Run through this after every meaningful PR (and always before promoting a
+production deploy). The long-form version with expected outcomes lives in
+[`docs/DEPLOYMENT.md §9`](docs/DEPLOYMENT.md#9-post-deploy-qa-checklist).
 
-```bash
-DATABASE_URL=<your-supabase-url> npx prisma migrate deploy
-```
-
-(Or hook this into a Vercel build / one-off shell.)
-
-### 5. Verify CI
-
-The GitHub Actions workflow at `.github/workflows/ci.yml` runs `npm ci`,
-`prisma generate`, `npm run lint`, `npm run typecheck`, and `npm run build`
-on every push/PR. CI uses an in-repo SQLite path so it never touches your
-Postgres database.
-
-## Migrating SQLite → Supabase Postgres
-
-The local SQLite schema stores a few `String` fields as JSON strings because
-SQLite doesn't support `String[]`. To move to Postgres:
-
-1. In `prisma/schema.prisma`, change `provider = "sqlite"` to
-   `provider = "postgresql"`.
-2. Convert the JSON-encoded array fields back to native `String[]`:
-   - `Favorite.keywordsJson: String` → `keywords: String[]`
-   - `CachedAsset.categoriesJson` / `keywordsJson` → `categories: String[]`,
-     `keywords: String[]`
-   - `CachedSearch.resultIdsJson` → `resultIds: String[]`
-3. Update consumers (`src/app/api/favorites/route.ts`, anywhere that uses
-   `parseJsonArray`) to read the arrays directly.
-4. Set `DATABASE_URL` to your Supabase connection string and run
-   `npx prisma migrate deploy`.
+- [ ] Register a new account (`/auth/register`).
+- [ ] Attempt to re-register the same email — friendly duplicate error
+      with a working "Go to sign in" link.
+- [ ] Sign in with the correct password.
+- [ ] Sign in with a wrong password — friendly error with a "Create a new
+      account" link.
+- [ ] As a guest, hit `/import` — cleanly redirects to
+      `/auth/login?callbackUrl=%2Fimport`.
+- [ ] On `/import`, click **Download sample CSV** and upload the
+      resulting file.
+- [ ] Confirm the preview + column mapping appears.
+- [ ] Click **Confirm import** — success toast + dataset row appears.
+- [ ] Run `/search` for a term that matches imported rows — results now
+      carry the `Verified` badge.
+- [ ] Save (heart) an asset, confirm it appears in `/saved`.
+- [ ] Export a CSV from `/search` — `/export` history reflects it with
+      the right data-quality tag and provider name.
+- [ ] The "Download again" button on `/export` is visible but disabled
+      and labeled **Coming soon**.
+- [ ] Archive the dataset from `/import` — `/search` falls back to
+      `Demo Data`.
+- [ ] No console errors across any page.
 
 ## Data providers
 
@@ -152,7 +170,7 @@ chosen at runtime from `DATA_PROVIDER`:
 | --- | --- | --- |
 | `mock` *(default)* | Implemented | Synthetic data tagged `demo`. Used everywhere by default. |
 | `official` | **Placeholder** | Throws `ProviderNotImplementedError`. Reserved for a future authoritative Adobe source (official Adobe API or a contributor's own signed export). Tagged `verified` once implemented. |
-| `manual` | **Placeholder** | Throws `ProviderNotImplementedError`. Reserved for user-uploaded CSV/JSON of their own analytics. Tagged `verified` once implemented. |
+| `manual` | **Implemented (Phase 3)** | Reads rows from `ImportedDataset` / `ImportedAsset` for the signed-in user. `selectProvider()` auto-promotes signed-in users with non-archived datasets to this provider — no explicit `DATA_PROVIDER=manual` needed. Tagged `verified`. |
 
 If a non-mock provider throws `ProviderNotImplementedError` at call time, the
 API routes log a warning and gracefully fall back to `mockProvider`, so the UI
