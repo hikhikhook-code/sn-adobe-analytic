@@ -1,0 +1,264 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { TopBar } from "@/components/layout/topbar";
+import { SearchBar } from "@/components/search/search-bar";
+import { SearchFilters } from "@/components/search/search-filters";
+import { ResultsSummary } from "@/components/search/results-summary";
+import { ResultsToolbar } from "@/components/search/results-toolbar";
+import { ResultCard } from "@/components/search/result-card";
+import { Pagination } from "@/components/search/pagination";
+import { RecentSearches } from "@/components/search/recent-searches";
+import { useRecentSearches } from "@/hooks/use-recent-searches";
+import { useFavorites } from "@/hooks/use-favorites";
+import { Skeleton } from "@/components/ui/skeleton";
+import type {
+  AiFilter,
+  ContentType,
+  SearchAsset,
+  SearchResponse,
+  SortMode,
+} from "@/types/search";
+
+function SearchPageInner() {
+  const router = useRouter();
+  const sp = useSearchParams();
+  const initialQ = sp.get("q") ?? "";
+
+  const [keyword, setKeyword] = useState(initialQ);
+  const [sort, setSort] = useState<SortMode>("relevance");
+  const [contentType, setContentType] = useState<ContentType>("all");
+  const [aiFilter, setAiFilter] = useState<AiFilter>("all");
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<SearchResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [toolbarSort, setToolbarSort] = useState<"default" | "downloads" | "performance">("default");
+  const [exporting, setExporting] = useState(false);
+
+  const { items: recents, add: addRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches();
+  const { isFavorited, toggle: toggleFavorite } = useFavorites();
+
+  const runSearch = useCallback(
+    async (kw: string, p = 1) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch("/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword: kw, sort, contentType, aiFilter, page: p }),
+        });
+        if (!res.ok) {
+          throw new Error(`Search failed (${res.status})`);
+        }
+        const json = (await res.json()) as SearchResponse;
+        setData(json);
+        setPage(p);
+        setSelected(new Set());
+        addRecent(kw);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Unknown error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [sort, contentType, aiFilter, addRecent],
+  );
+
+  useEffect(() => {
+    if (initialQ) {
+      setKeyword(initialQ);
+      runSearch(initialQ, 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQ]);
+
+  const handleSubmit = useCallback(
+    (kw: string) => {
+      setKeyword(kw);
+      const params = new URLSearchParams(sp.toString());
+      params.set("q", kw);
+      router.push(`/search?${params.toString()}`);
+      runSearch(kw, 1);
+    },
+    [router, runSearch, sp],
+  );
+
+  const handleFiltersChange = useCallback(
+    (next: Partial<{ sort: SortMode; contentType: ContentType; aiFilter: AiFilter }>) => {
+      if (next.sort !== undefined) setSort(next.sort);
+      if (next.contentType !== undefined) setContentType(next.contentType);
+      if (next.aiFilter !== undefined) setAiFilter(next.aiFilter);
+    },
+    [],
+  );
+
+  // Re-run when filters change & we have a keyword
+  useEffect(() => {
+    if (keyword) {
+      runSearch(keyword, 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sort, contentType, aiFilter]);
+
+  const sortedResults = useMemo(() => {
+    if (!data) return [] as SearchAsset[];
+    const out = [...data.results];
+    if (toolbarSort === "downloads") out.sort((a, b) => b.downloads - a.downloads);
+    if (toolbarSort === "performance") out.sort((a, b) => b.performanceScore - a.performanceScore);
+    return out;
+  }, [data, toolbarSort]);
+
+  const toggleSelected = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback(() => {
+    if (!data) return;
+    if (selected.size === data.results.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(data.results.map((r) => r.id)));
+    }
+  }, [data, selected.size]);
+
+  const handleExport = useCallback(async () => {
+    if (!data) return;
+    const targets = selected.size > 0
+      ? data.results.filter((r) => selected.has(r.id))
+      : data.results;
+    setExporting(true);
+    try {
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "search", query: keyword, results: targets }),
+      });
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `sn-search-${keyword.replace(/\s+/g, "-")}-${
+        new Date().toISOString().slice(0, 10)
+      }.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  }, [data, keyword, selected]);
+
+  return (
+    <>
+      <TopBar
+        title="Search"
+        subtitle="Find Adobe Stock keywords and analyze performance"
+      />
+      <div className="space-y-6 p-6">
+        <div className="space-y-4 rounded-2xl border border-border/40 bg-card p-5 shadow-sm">
+          <SearchBar
+            defaultValue={keyword}
+            loading={loading}
+            onSubmit={handleSubmit}
+          />
+          <SearchFilters
+            sort={sort}
+            contentType={contentType}
+            aiFilter={aiFilter}
+            onChange={handleFiltersChange}
+          />
+          <RecentSearches
+            items={recents}
+            onPick={handleSubmit}
+            onRemove={removeRecent}
+            onClear={clearRecents}
+          />
+        </div>
+
+        {error && (
+          <div className="rounded-md bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
+        )}
+
+        {loading && !data && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-[480px] w-full" />
+            ))}
+          </div>
+        )}
+
+        {data && (
+          <>
+            <ResultsSummary
+              totalResults={data.totalResults}
+              keyword={keyword}
+              competitionLevel={data.competitionLevel}
+              aiSaturation={data.aiSaturation}
+              contentBreakdown={data.contentBreakdown}
+            />
+
+            <ResultsToolbar
+              total={data.results.length}
+              selectedCount={selected.size}
+              toolbarSort={toolbarSort}
+              onSortChange={setToolbarSort}
+              onSelectAll={selectAll}
+              onExport={handleExport}
+              exporting={exporting}
+            />
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {sortedResults.map((asset) => (
+                <ResultCard
+                  key={asset.id}
+                  asset={asset}
+                  isFavorited={isFavorited(asset.id)}
+                  onToggleFavorite={toggleFavorite}
+                  selected={selected.has(asset.id)}
+                  onToggleSelected={toggleSelected}
+                />
+              ))}
+            </div>
+
+            <Pagination
+              page={page}
+              hasNext={data.results.length >= data.pageSize}
+              onChange={(p) => runSearch(keyword, p)}
+            />
+          </>
+        )}
+
+        {!loading && !data && !error && (
+          <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center text-muted-foreground">
+            <p className="text-sm">
+              Try a keyword like <span className="font-medium text-foreground">business</span>,{" "}
+              <span className="font-medium text-foreground">nature</span>, or{" "}
+              <span className="font-medium text-foreground">ai illustration</span>.
+            </p>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+export default function SearchPage() {
+  return (
+    <Suspense fallback={null}>
+      <SearchPageInner />
+    </Suspense>
+  );
+}
