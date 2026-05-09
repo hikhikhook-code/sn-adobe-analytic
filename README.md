@@ -68,21 +68,62 @@ niche heat maps, and export results to CSV.
 
 ## Local development (SQLite)
 
+**Quick path (recommended, works on desktop + Termux/phone):**
+
 ```bash
 # 1. Install dependencies
 npm install
 
-# 2. Configure env
-cp .env.example .env
-# (the defaults work for local dev — DATA_PROVIDER=mock by default)
+# 2. Create .env with safe local defaults + run Prisma + start dev server
+npm run dev:local
+# -> http://localhost:3000
+```
 
-# 3. Set up the database
+`npm run dev:local` chains four things: `setup:local` (writes `.env`
+automatically — see below), `prisma generate`, `prisma db push`, and
+`next dev`. Safe to rerun — your existing `.env` values are never
+overwritten.
+
+If you prefer to run the pieces separately:
+
+```bash
+npm install
+npm run setup:local        # creates/patches .env
 npx prisma generate
 npx prisma db push
-
-# 4. Run the dev server
 npm run dev
-# -> http://localhost:3000
+```
+
+**What `npm run setup:local` does**
+
+`scripts/setup-local-env.js` is a tiny, idempotent helper:
+
+- If `.env` is missing, it's created from `.env.example`.
+- Ensures `DATABASE_URL`, `NEXTAUTH_URL`, `NEXTAUTH_SECRET`,
+  `DATA_PROVIDER`, `MAX_IMPORT_FILE_SIZE_MB`, and `USE_LIVE_SCRAPER`
+  exist with sane local-dev values.
+- **Only** replaces `NEXTAUTH_SECRET` when it still holds the
+  placeholder from `.env.example` (or is empty). If you've already
+  generated a real secret, it's left alone.
+- Never touches `.env` on the server — this script runs from your
+  developer machine only, and `.env` stays in `.gitignore`.
+
+The dev-only `NEXTAUTH_SECRET` the script writes begins with
+`local-dev-`, so `src/lib/env.ts`'s strict-runtime guard **still
+refuses to boot production** with that value — the shortcut is
+local-only by construction. See README § *Env validation* and
+`docs/DEPLOYMENT.md` § *10. Troubleshooting* for the production
+checklist.
+
+**Manual setup (if you want to edit `.env` by hand):**
+
+```bash
+npm install
+cp .env.example .env
+# ... edit .env to taste ...
+npx prisma generate
+npx prisma db push
+npm run dev
 ```
 
 The app redirects `/` to `/search`. Try keywords like `business`, `nature`, or
