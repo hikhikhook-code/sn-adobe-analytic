@@ -10,8 +10,8 @@ import Papa from "papaparse";
 // components can import it without pulling papaparse into the client bundle.
 // We re-export the same names here so existing server-side importers
 // (`@/lib/import/csv`) continue to work.
-export { IMPORT_FIELDS, type ImportField } from "./fields";
-import type { ImportField } from "./fields";
+import { IMPORT_FIELDS, type ImportField } from "./fields";
+export { IMPORT_FIELDS, type ImportField };
 
 /**
  * Aliases the auto-mapper considers when matching CSV headers → canonical
