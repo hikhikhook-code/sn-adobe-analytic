@@ -31,6 +31,7 @@ model User {
   searches  SearchHistory[]
   favorites Favorite[]
   exports   ExportHistory[]
+  importedDatasets ImportedDataset[]
 }
 
 model Account {
@@ -143,12 +144,68 @@ model CachedSearch {
 }
 
 model ExportHistory {
-  id        String   @id @default(cuid())
-  userId    String
-  type      String // "search" | "portfolio"
-  query     String
-  rowCount  Int
-  fileUrl   String?
-  createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           String   @id @default(cuid())
+  userId       String
+  type         String // "search" | "portfolio" | "saved" | "imported"
+  query        String // search keyword, contributor query, dataset name, etc.
+  rowCount     Int
+  dataQuality  String   @default("demo") // "demo" | "estimated" | "public_metadata" | "verified"
+  providerName String   @default("Mock data provider")
+  fileUrl      String?
+  paramsJson   String   @default("{}") // serialized request payload to support "download again"
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// User-uploaded analytics (CSV / JSON). Each row in `ImportedAsset` represents
+// one asset the user owns. Multiple datasets per user are supported — when the
+// manualImportProvider serves a query it aggregates across all of a user's
+// non-archived datasets.
+model ImportedDataset {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  source      String   @default("csv") // "csv" | "json"
+  rowCount    Int      @default(0)
+  archived    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assets      ImportedAsset[]
+
+  @@index([userId, createdAt])
+}
+
+model ImportedAsset {
+  id                  String   @id @default(cuid())
+  datasetId           String
+  // Original asset identifiers from the user's export (best-effort; we
+  // keep them as strings to avoid clashing with our cuid `id`).
+  externalId          String?
+  // Core fields. Anything the user did NOT supply is left null and we
+  // surface it as "unknown" in the UI rather than fabricating a value.
+  title               String?
+  thumbnailUrl        String?
+  downloads           Int?
+  performanceScore    Int?     // user-provided score; if absent, app may compute an estimated one
+  downloadsPerMonth   Float?
+  contentType         String?
+  categoriesJson      String   @default("[]") // JSON-encoded String[]
+  uploadDate          DateTime?
+  contributorName     String?
+  contributorId       String?
+  isPremium           Boolean  @default(false)
+  isAiGenerated       Boolean  @default(false)
+  keywordsJson        String   @default("[]") // JSON-encoded String[]
+  adobeStockUrl       String?
+  // Per-field provenance stored as JSON map (field -> "verified" | "estimated").
+  // Anything not present in this map defaults to the dataset-level quality.
+  fieldQualityJson    String   @default("{}")
+  createdAt           DateTime @default(now())
+  dataset             ImportedDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([datasetId])
+  @@index([contributorName])
 }

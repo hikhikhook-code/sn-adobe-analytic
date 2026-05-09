@@ -26,15 +26,22 @@ niche heat maps, and export results to CSV.
 ## Status
 
 - **Phase 1** — search, auth, layout, mock data, all sidebar pages navigable.
-- **Phase 2 (this PR)** — stabilization & deploy readiness:
+- **Phase 2** — stabilization & deploy readiness:
   - Pluggable data-provider architecture (`mock` / `official` / `manual`)
   - `DataQuality` badges & banners on every analytics surface
   - GitHub Actions CI (install → prisma generate → lint → typecheck → build)
   - Production-safe live-scraper guardrails
   - Vercel deploy + SQLite → Supabase Postgres migration guide
   - UX polish (empty / loading / error states, mobile sidebar drawer)
-- **Phase 3+** (deferred) — actually pulling real data from an authoritative
-  source, similar-image search, pricing flow.
+- **Phase 3 (this PR)** — Manual import + user-owned data + export history:
+  - Real `manualImportProvider` reading user-uploaded CSVs from the database
+  - `/import` page: upload → preview → column mapping → confirm → success
+  - Imported data automatically takes over Search / Dashboard / Portfolio /
+    Heat Map / Trending / Saved / Export for the signed-in user (zero-config)
+  - Persisted search history surfaced on the dashboard
+  - Completed `/export` with history table + per-export quality tagging
+- **Phase 3+** (still deferred) — official Adobe data source, similar-image
+  search, pricing flow.
 
 ## Tech stack
 
@@ -176,6 +183,52 @@ get wrong:
 The UI will automatically render the matching badge (`Verified`,
 `Public Metadata`, etc.) on every metric.
 
+## Manual data import
+
+The fastest way to get real numbers into the app today is to import them
+yourself. From `/import` (sidebar → **Import data**):
+
+1. Sign in (imports are scoped per user).
+2. Upload a CSV (max 10 MB).
+3. The server parses it and auto-suggests a column mapping based on header
+   names (case-insensitive, punctuation-insensitive).
+4. Review the preview table — you can override any column → field mapping
+   before confirming.
+5. Confirm. The dataset is stored in `ImportedDataset` + `ImportedAsset`
+   under your user.
+
+Once at least one non-archived dataset exists for the signed-in user,
+`selectProvider()` automatically switches that user's requests to
+`manualImportProvider` — Search, Dashboard, Portfolio, Heat Map, Trending,
+and Export all start serving the user's verified data instead of the demo
+fallback. No env-var change required.
+
+### Recognized CSV columns
+
+The mapper looks for any of these (or common synonyms):
+
+```
+id, title, downloads, performanceScore, downloadsPerMonth,
+contentType, categories, uploadDate, contributorName,
+contributorId, keywords, adobeStockUrl, thumbnailUrl,
+isPremium, isAiGenerated
+```
+
+Any field you omit is left as **unknown**. The app refuses to fabricate
+numbers for imported data; if you don't supply `downloads`, you'll see
+`0` with no badge upgrade. Two fields the app will compute when possible:
+
+- `performanceScore` and `downloadsPerMonth` — derived from `downloads` +
+  `uploadDate` via the formulas in `src/lib/scoring.ts`. Computed values
+  carry the `Estimated` tag, not `Verified`.
+
+### Export history
+
+Every CSV download from anywhere in the app inserts a row into
+`ExportHistory` for the signed-in user. The `/export` page lists the most
+recent 100 exports with the data-quality tag from when they were generated
+(so you can tell at a glance which past exports were demo vs verified).
+
 ## Implemented in Phase 1
 
 - Sidebar nav (dark navy), top bar, lavender background, white cards
@@ -213,12 +266,31 @@ The UI will automatically render the matching badge (`Verified`,
 - Vercel deploy + Supabase migration guide
 - `.env.example` cleanup with `DATA_PROVIDER` selector
 
+## Added in Phase 3
+
+- `manualImportProvider` reading from new `ImportedDataset` + `ImportedAsset`
+  Prisma models
+- `/import` page with drag-and-drop CSV upload, server-side parse via
+  `papaparse`, header auto-mapping with manual override, preview table,
+  validation errors, and dataset list with archive action
+- `/api/import/preview`, `/api/import` (POST/GET), `/api/import/:id` (DELETE)
+- `selectProvider()` auto-promotes signed-in users with imported data to
+  `manualImportProvider`
+- Imported data flows into Search, Dashboard, Portfolio, Heat Map, Trending,
+  Saved, Export — all carrying the `Verified` badge
+- Completed `/export` page with `ExportHistory` table; per-export quality
+  + provider tagging on `/api/export`
+- Dashboard activity counters & recent searches sourced from `SearchHistory`
+  / `Favorite` / `ExportHistory` tables (formerly placeholder zeros)
+
 ## Phase 3+ TODO
 
-- An actually authoritative data source (Adobe API or contributor-signed export)
+- `officialAdobeProvider` against an authoritative source (Adobe API or
+  contributor-signed export feed)
 - Similar image search (upload → reverse search)
 - Email-based password reset
-- Search-history-driven dashboard counters
+- Active dataset selector (today all of a user's datasets are aggregated)
+- JSON import (today only CSV is supported)
 - Device limit + session management
 - Pricing page + Stripe / PayPal / Cryptomus integration (Phase 4 SaaS)
 
@@ -247,11 +319,13 @@ src/
 │   ├── constants.ts      # Sidebar nav, options
 │   ├── mock-data.ts      # Generators for search/portfolio/heatmap demos
 │   ├── providers/        # Data-provider layer
-│   │   ├── types.ts
-│   │   ├── mock.ts
+│   │   ├── types.ts            # DataProvider, ProviderContext, error classes
+│   │   ├── mock.ts             # default fallback
 │   │   ├── official-adobe.ts   # placeholder (throws + warns)
-│   │   ├── manual-import.ts    # placeholder (throws + warns)
-│   │   └── index.ts            # selectProvider() dispatcher
+│   │   ├── manual-import.ts    # real, DB-backed (Phase 3)
+│   │   └── index.ts            # selectProvider() + run* helpers
+│   ├── import/
+│   │   └── csv.ts              # papaparse + column auto-mapping
 │   ├── scraper/
 │   │   └── adobe-stock.ts # Thin wrapper that delegates to selectProvider()
 │   └── utils.ts          # cn(), formatNumber, timeAgo, parseJsonArray

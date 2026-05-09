@@ -7,6 +7,7 @@ import {
   TrendingUp,
   FileDown,
   Settings,
+  Upload,
   type LucideIcon,
 } from "lucide-react";
 
@@ -25,8 +26,9 @@ export const PRIMARY_NAV: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Portfolio Tracker", href: "/portfolio", icon: Users },
   { label: "Heat Map", href: "/heatmap", icon: Map },
-  { label: "Saved", href: "/saved", icon: Heart },
   { label: "Trending", href: "/trending", icon: TrendingUp },
+  { label: "Saved", href: "/saved", icon: Heart },
+  { label: "Import data", href: "/import", icon: Upload },
   { label: "Export", href: "/export", icon: FileDown },
 ];
 
