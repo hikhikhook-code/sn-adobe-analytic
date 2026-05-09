@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "setup:local": "node scripts/setup-local-env.js",
+    "dev:local": "npm run setup:local && npx prisma generate && npx prisma db push && npm run dev"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
