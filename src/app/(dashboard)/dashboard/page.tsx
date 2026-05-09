@@ -32,6 +32,8 @@ import {
 } from "@/components/ui/data-quality";
 import { formatNumber, timeAgo } from "@/lib/utils";
 import type { ProviderTrendingResult } from "@/lib/providers/types";
+import type { DatasetScope, DatasetScopeInfo } from "@/lib/dataset-scope";
+import { DataSourceBanner } from "@/components/layout/data-source-banner";
 
 interface DashboardStats {
   signedIn: boolean;
@@ -40,6 +42,10 @@ interface DashboardStats {
   savedAssets: number;
   exportsMade: number;
   trackedContributors: number;
+  importedAssets: number;
+  datasetScope: DatasetScope;
+  datasetName: string | null;
+  scopeReason: DatasetScopeInfo["reason"];
   recentSearches: {
     id: string;
     keyword: string;
@@ -96,18 +102,19 @@ export default function DashboardPage() {
           }
         />
 
-        {stats?.signedIn ? (
-          <DataQualityBanner
-            level="verified"
+        {stats && stats.signedIn ? (
+          <DataSourceBanner
+            scope={stats.datasetScope}
+            datasetName={stats.datasetName}
+            hasAnyDatasets={stats.hasImportedData}
+            reason={stats.scopeReason}
             providerName={
-              stats.hasImportedData
-                ? "Your account · User imported data"
-                : "Your account"
+              stats.datasetScope.kind === "demo"
+                ? "Mock data provider"
+                : "User imported data"
             }
-            message={
-              stats.hasImportedData
-                ? "Activity counters reflect your account; trending uses your imported data."
-                : "Activity counters reflect your account. Trending data is still demo until you import a CSV."
+            dataQuality={
+              stats.datasetScope.kind === "demo" ? "demo" : "verified"
             }
           />
         ) : (

@@ -7,8 +7,12 @@ import { useSession } from "next-auth/react";
 import {
   AlertTriangle,
   CheckCircle2,
+  Database,
   FileDown,
+  Layers,
   Loader2,
+  MoreHorizontal,
+  PencilLine,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -27,9 +31,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SimpleSelect } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DataQualityBadge, DataQualityBanner } from "@/components/ui/data-quality";
+import { Badge } from "@/components/ui/badge";
+import {
+  DataQualityBadge,
+} from "@/components/ui/data-quality";
+import { DataSourceBanner } from "@/components/layout/data-source-banner";
 import { CsvUploader } from "@/components/import/csv-uploader";
 import { formatNumber, timeAgo } from "@/lib/utils";
+import {
+  dispatchActiveDatasetChanged,
+  useActiveDataset,
+} from "@/hooks/use-active-dataset";
 
 // NOTE: We import from "@/lib/import/fields" (papaparse-free) rather than
 // "@/lib/import/csv", so this client bundle stays lean and doesn't pull any
@@ -38,11 +50,6 @@ import { formatNumber, timeAgo } from "@/lib/utils";
 // re-exported for the API routes that need them.
 import { IMPORT_FIELDS, type ImportField } from "@/lib/import/fields";
 
-// Client-side soft limit to match the default `MAX_IMPORT_FILE_SIZE_MB=10`
-// in `.env.example`. The server re-validates against `env.maxImportFileSizeBytes`
-// (see src/lib/env.ts), so operators can raise the real ceiling without
-// needing a frontend redeploy — the UI will still bounce oversized files
-// early, just with the default limit in the error message.
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_MB = 10;
 const SAMPLE_CSV_URL = "/samples/adobe-stock-sample.csv";
@@ -57,10 +64,20 @@ interface PreviewResponse {
 interface DatasetRow {
   id: string;
   name: string;
+  originalFileName: string | null;
   source: string;
   rowCount: number;
+  skippedRowCount: number;
+  archived: boolean;
   createdAt: string;
   updatedAt: string;
+  isActive: boolean;
+  status: "active" | "archived";
+}
+
+interface DatasetsPayload {
+  activeDatasetId: string | null;
+  datasets: DatasetRow[];
 }
 
 const MAPPING_OPTIONS = [
@@ -70,6 +87,7 @@ const MAPPING_OPTIONS = [
 
 export default function ImportPage() {
   const router = useRouter();
+  const active = useActiveDataset();
   // Send guests to /auth/login with a callback that returns them here once
   // they sign in. This replaces the older UX that let the page render fully
   // and only surfaced a red "Sign in to import data" banner after the first
@@ -81,6 +99,7 @@ export default function ImportPage() {
     }
   }, [status, router]);
 
+  // ---- Upload form state ---------------------------------------------------
   const [datasetName, setDatasetName] = useState("");
   const [csvText, setCsvText] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
@@ -92,8 +111,10 @@ export default function ImportPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  // ---- Dataset management state -------------------------------------------
   const [datasets, setDatasets] = useState<DatasetRow[] | null>(null);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
+  const [rowBusy, setRowBusy] = useState<string | null>(null); // dataset id under action
 
   // Load existing datasets on mount — only if authenticated. Guests will be
   // redirected away by the useSession effect above, so firing the fetch
@@ -108,15 +129,13 @@ export default function ImportPage() {
     try {
       const res = await fetch("/api/import");
       if (res.status === 401) {
-        // Session expired between mount and this fetch — send the user back
-        // to login preserving their intent to return to /import.
         setDatasets([]);
         setDatasetsError("Your session expired. Redirecting to sign in…");
         router.replace("/auth/login?callbackUrl=%2Fimport");
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const j = (await res.json()) as { datasets: DatasetRow[] };
+      const j = (await res.json()) as DatasetsPayload;
       setDatasets(j.datasets);
       setDatasetsError(null);
     } catch (e) {
@@ -130,9 +149,7 @@ export default function ImportPage() {
     setError(null);
     setSuccess(null);
     if (file.size === 0) {
-      setError(
-        "That file is empty. Export your analytics and try again.",
-      );
+      setError("That file is empty. Export your analytics and try again.");
       return;
     }
     if (file.size > MAX_BYTES) {
@@ -142,9 +159,6 @@ export default function ImportPage() {
       );
       return;
     }
-    // Browsers don't always set a `.csv` MIME type, so we rely on the
-    // extension. Accept both ".csv" explicitly and a text/csv MIME as a
-    // belt-and-braces fallback.
     const looksLikeCsv =
       file.name.toLowerCase().endsWith(".csv") ||
       file.type === "text/csv" ||
@@ -209,6 +223,7 @@ export default function ImportPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: datasetName.trim(),
+          originalFileName: fileName,
           csv: csvText,
           mapping,
         }),
@@ -218,8 +233,12 @@ export default function ImportPage() {
         setError(j.error ?? "Import failed.");
         return;
       }
+      const skipped = j.dataset?.skippedRowCount ?? 0;
       setSuccess(
-        `Imported ${j.dataset?.rowCount ?? "all"} rows as "${j.dataset?.name}". They are now available across the app.`,
+        `Imported ${formatNumber(j.dataset?.rowCount ?? 0)} rows as "${
+          j.dataset?.name
+        }"${skipped ? ` (skipped ${formatNumber(skipped)} row${skipped === 1 ? "" : "s"})` : ""}. ` +
+          "They are now available across the app.",
       );
       setDatasetName("");
       setCsvText("");
@@ -228,7 +247,10 @@ export default function ImportPage() {
       setPreview(null);
       setMapping({});
       await loadDatasets();
-      // Nudge other pages to refetch by triggering router refresh.
+      // The global selector also caches a "do I have any datasets?" flag
+      // and the list — fire the shared event so it refetches without a
+      // full router.refresh(). We still refresh for the server components.
+      dispatchActiveDatasetChanged();
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Import failed.");
@@ -237,24 +259,88 @@ export default function ImportPage() {
     }
   }
 
-  async function deleteDataset(id: string) {
-    if (
-      !confirm(
-        "Archive this dataset? Its rows will stop appearing in search/dashboard. You can recreate it by importing again.",
-      )
-    )
-      return;
+  // ---- Row actions ---------------------------------------------------------
+
+  async function setActive(id: string | null) {
+    setRowBusy(id ?? "__all__");
     try {
-      const res = await fetch(`/api/import/${id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const j = await res.json().catch(() => null);
-        alert(j?.error ?? "Failed to archive dataset.");
-        return;
-      }
+      await active.update(id ? { kind: "specific", datasetId: id } : { kind: "all" });
       await loadDatasets();
       router.refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to archive dataset.");
+      alert(e instanceof Error ? e.message : "Failed to set active dataset.");
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
+  async function renameDataset(id: string, currentName: string) {
+    const next = prompt("Rename dataset", currentName);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed) {
+      alert("Dataset name cannot be empty.");
+      return;
+    }
+    if (trimmed === currentName) return;
+    setRowBusy(id);
+    try {
+      const res = await fetch(`/api/import/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        alert(j?.error ?? "Failed to rename dataset.");
+        return;
+      }
+      await loadDatasets();
+      dispatchActiveDatasetChanged();
+      router.refresh();
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
+  async function archiveDataset(id: string) {
+    if (
+      !confirm(
+        "Archive this dataset? It will stop appearing in search/dashboard. You can re-import to recreate it.",
+      )
+    )
+      return;
+    await removeDataset(id, false);
+  }
+
+  async function hardDeleteDataset(id: string, name: string) {
+    if (
+      !confirm(
+        `Delete "${name}" permanently? This cannot be undone — all rows in this dataset will be erased. ` +
+          `If you only want to hide it, use Archive instead.`,
+      )
+    )
+      return;
+    await removeDataset(id, true);
+  }
+
+  async function removeDataset(id: string, hard: boolean) {
+    setRowBusy(id);
+    try {
+      const res = await fetch(
+        `/api/import/${id}${hard ? "?hard=true" : ""}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        alert(j?.error ?? "Failed to remove dataset.");
+        return;
+      }
+      await loadDatasets();
+      dispatchActiveDatasetChanged();
+      router.refresh();
+    } finally {
+      setRowBusy(null);
     }
   }
 
@@ -275,10 +361,19 @@ export default function ImportPage() {
           description="Bring your own analytics export and the app will use it across Search, Dashboard, Portfolio, Heat Map, and Trending — replacing the demo data with your verified numbers."
         />
 
-        <DataQualityBanner
-          level="verified"
-          providerName="User imported data"
-          message="Anything you import is tagged Verified for the fields you supplied. Fields you leave blank stay blank — we never invent numbers for imported data."
+        {/* Page-level banner mirrors the top-bar selector. Users get two
+            consistent places to see which data source is active. */}
+        <DataSourceBanner
+          scope={active.scope}
+          datasetName={active.datasetName}
+          hasAnyDatasets={active.hasAnyDatasets}
+          reason={active.reason}
+          providerName={
+            active.scope.kind === "demo"
+              ? "Mock data provider"
+              : "User imported data"
+          }
+          dataQuality={active.scope.kind === "demo" ? "demo" : "verified"}
         />
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[2fr,1fr]">
@@ -296,12 +391,6 @@ export default function ImportPage() {
                   </CardDescription>
                 </div>
                 <Button asChild variant="outline" size="sm">
-                  {/*
-                    Link to a 12-row demo CSV in /public/samples. Served by
-                    Next.js as a static file so there's no extra route to
-                    maintain. The `download` attribute asks the browser to
-                    save it rather than render in-place.
-                  */}
                   <a
                     href={SAMPLE_CSV_URL}
                     download="adobe-stock-sample.csv"
@@ -464,20 +553,39 @@ export default function ImportPage() {
 
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <CardTitle>Your imported datasets</CardTitle>
                 <CardDescription>
-                  Aggregated across Search, Dashboard, Portfolio, Heat Map, and
-                  Trending.
+                  Pick one dataset to power every analytics page, or aggregate
+                  across all of them.
                 </CardDescription>
               </div>
-              <Link
-                href="/search"
-                className="text-xs font-medium text-accent-blue hover:underline"
-              >
-                Try a search now →
-              </Link>
+              <div className="flex flex-wrap items-center gap-2">
+                {datasets && datasets.length > 0 ? (
+                  <Button
+                    type="button"
+                    variant={active.scope.kind === "all" ? "accent" : "outline"}
+                    size="sm"
+                    disabled={rowBusy === "__all__"}
+                    onClick={() => setActive(null)}
+                    title="Aggregate across every dataset"
+                  >
+                    {rowBusy === "__all__" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Layers className="h-3.5 w-3.5" />
+                    )}
+                    Use all datasets
+                  </Button>
+                ) : null}
+                <Link
+                  href="/search"
+                  className="text-xs font-medium text-accent-blue hover:underline"
+                >
+                  Try a search now →
+                </Link>
+              </div>
             </div>
           </CardHeader>
           <CardContent>
@@ -489,12 +597,19 @@ export default function ImportPage() {
             ) : datasets === null ? (
               <div className="space-y-2">
                 {Array.from({ length: 3 }).map((_, i) => (
-                  <Skeleton key={i} className="h-12 w-full rounded-lg" />
+                  <Skeleton key={i} className="h-14 w-full rounded-lg" />
                 ))}
               </div>
             ) : datasets.length === 0 ? (
               <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-                No datasets yet. Upload a CSV above to get started.
+                <Database className="mx-auto mb-2 h-6 w-6" />
+                <p className="font-medium text-foreground">
+                  No imported datasets yet
+                </p>
+                <p className="mt-1 text-xs">
+                  Upload a CSV above to replace the demo data with your own
+                  verified numbers.
+                </p>
               </div>
             ) : (
               <div className="overflow-x-auto rounded-lg border border-border">
@@ -502,44 +617,115 @@ export default function ImportPage() {
                   <thead className="bg-muted/40 text-left">
                     <tr>
                       <th className="px-3 py-2 font-semibold">Name</th>
+                      <th className="px-3 py-2 font-semibold">Source file</th>
                       <th className="px-3 py-2 font-semibold">Rows</th>
-                      <th className="px-3 py-2 font-semibold">Source</th>
                       <th className="px-3 py-2 font-semibold">Imported</th>
+                      <th className="px-3 py-2 font-semibold">Status</th>
                       <th className="px-3 py-2 text-right font-semibold">
                         Actions
                       </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {datasets.map((d) => (
-                      <tr key={d.id} className="border-t border-border">
-                        <td className="px-3 py-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-medium">{d.name}</span>
-                            <DataQualityBadge level="verified" size="xs" />
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 text-muted-foreground">
-                          {formatNumber(d.rowCount)}
-                        </td>
-                        <td className="px-3 py-2 text-muted-foreground">
-                          {d.source.toUpperCase()}
-                        </td>
-                        <td className="px-3 py-2 text-muted-foreground">
-                          {timeAgo(d.createdAt)}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => deleteDataset(d.id)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                            Archive
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
+                    {datasets.map((d) => {
+                      const busy = rowBusy === d.id;
+                      return (
+                        <tr
+                          key={d.id}
+                          className={
+                            d.isActive
+                              ? "border-t border-border bg-accent-blue/5"
+                              : "border-t border-border"
+                          }
+                        >
+                          <td className="px-3 py-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium">{d.name}</span>
+                              <DataQualityBadge level="verified" size="xs" />
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-muted-foreground">
+                            <span title={d.originalFileName ?? "—"}>
+                              {d.originalFileName ?? "—"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-muted-foreground">
+                            <div className="whitespace-nowrap">
+                              {formatNumber(d.rowCount)} valid
+                            </div>
+                            {d.skippedRowCount > 0 ? (
+                              <div className="whitespace-nowrap text-[11px] text-amber-700">
+                                {formatNumber(d.skippedRowCount)} skipped
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
+                            {timeAgo(d.createdAt)}
+                          </td>
+                          <td className="px-3 py-2">
+                            {d.isActive ? (
+                              <Badge variant="success" className="gap-1">
+                                <CheckCircle2 className="h-3 w-3" />
+                                Active
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline">Available</Badge>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <div className="inline-flex items-center gap-1">
+                              {!d.isActive ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={busy}
+                                  onClick={() => setActive(d.id)}
+                                  title="Make this the active dataset"
+                                >
+                                  {busy ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <Database className="h-3.5 w-3.5" />
+                                  )}
+                                  Set as active
+                                </Button>
+                              ) : null}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy}
+                                onClick={() => renameDataset(d.id, d.name)}
+                                title="Rename dataset"
+                              >
+                                <PencilLine className="h-3.5 w-3.5" />
+                                Rename
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy}
+                                onClick={() => archiveDataset(d.id)}
+                                title="Hide without deleting (recoverable)"
+                              >
+                                <MoreHorizontal className="h-3.5 w-3.5" />
+                                Archive
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy}
+                                onClick={() => hardDeleteDataset(d.id, d.name)}
+                                title="Permanently delete this dataset and all its rows"
+                                className="text-rose-700 hover:text-rose-800"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                Delete
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

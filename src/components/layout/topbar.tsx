@@ -5,6 +5,7 @@ import { Search, Bell, Menu } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useSidebar } from "@/components/layout/sidebar-context";
+import { DatasetSelector } from "@/components/layout/dataset-selector";
 
 interface TopBarProps {
   title?: string;
@@ -59,6 +60,10 @@ export function TopBar({ title, subtitle }: TopBarProps) {
         </div>
       </form>
       <div className="flex items-center gap-2">
+        {/* Dataset selector sits next to notifications so it's visible
+            across every dashboard route without each page having to opt
+            in. Component internally no-ops for guests. */}
+        <DatasetSelector />
         <Button variant="ghost" size="icon" aria-label="Notifications">
           <Bell className="h-4 w-4" />
         </Button>

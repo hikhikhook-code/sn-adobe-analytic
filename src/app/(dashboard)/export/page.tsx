@@ -26,6 +26,10 @@ interface ExportRow {
   rowCount: number;
   dataQuality: DataQuality;
   providerName: string;
+  datasetScope: "all_datasets" | "selected_dataset" | "demo_data";
+  datasetId: string | null;
+  datasetName: string | null;
+  datasetArchived: boolean | null;
   createdAt: string;
 }
 
@@ -35,6 +39,19 @@ const TYPE_LABELS: Record<string, string> = {
   saved: "Saved assets",
   imported: "Imported dataset",
 };
+
+function describeScope(row: ExportRow): string {
+  if (row.datasetScope === "selected_dataset") {
+    if (row.datasetName) {
+      return row.datasetArchived
+        ? `Dataset: ${row.datasetName} (archived)`
+        : `Dataset: ${row.datasetName}`;
+    }
+    return "Dataset: (deleted)";
+  }
+  if (row.datasetScope === "all_datasets") return "All imported datasets";
+  return "Demo data";
+}
 
 export default function ExportPage() {
   const [exports, setExports] = useState<ExportRow[] | null>(null);
@@ -148,6 +165,9 @@ export default function ExportPage() {
                               />
                               <span className="text-[11px] text-muted-foreground">
                                 {e.providerName}
+                              </span>
+                              <span className="text-[11px] text-muted-foreground">
+                                {describeScope(e)}
                               </span>
                             </div>
                           </td>

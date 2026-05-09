@@ -13,7 +13,9 @@ import { RecentSearches } from "@/components/search/recent-searches";
 import { useRecentSearches } from "@/hooks/use-recent-searches";
 import { useFavorites } from "@/hooks/use-favorites";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DataQualityBanner } from "@/components/ui/data-quality";
+import { DataSourceBanner } from "@/components/layout/data-source-banner";
+import { useActiveDataset } from "@/hooks/use-active-dataset";
+import type { DatasetScope, DatasetScopeInfo } from "@/lib/dataset-scope";
 import type {
   AiFilter,
   ContentType,
@@ -21,6 +23,16 @@ import type {
   SearchResponse,
   SortMode,
 } from "@/types/search";
+
+// The /api/search route now echoes back the resolved scope so we can render
+// the banner + export payload without a second fetch. We widen SearchResponse
+// locally with those optional fields.
+interface SearchResponseWithScope extends SearchResponse {
+  datasetScope?: DatasetScope;
+  datasetName?: string | null;
+  scopeReason?: DatasetScopeInfo["reason"];
+  hasAnyDatasets?: boolean;
+}
 
 function SearchPageInner() {
   const router = useRouter();
@@ -32,12 +44,16 @@ function SearchPageInner() {
   const [contentType, setContentType] = useState<ContentType>("all");
   const [aiFilter, setAiFilter] = useState<AiFilter>("all");
   const [page, setPage] = useState(1);
-  const [data, setData] = useState<SearchResponse | null>(null);
+  const [data, setData] = useState<SearchResponseWithScope | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toolbarSort, setToolbarSort] = useState<"default" | "downloads" | "performance">("default");
   const [exporting, setExporting] = useState(false);
+
+  // Mirror the global selector so the empty-state banner can describe the
+  // user's scope even before they run a search.
+  const active = useActiveDataset();
 
   const { items: recents, add: addRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches();
   const { isFavorited, toggle: toggleFavorite } = useFavorites();
@@ -55,7 +71,7 @@ function SearchPageInner() {
         if (!res.ok) {
           throw new Error(`Search failed (${res.status})`);
         }
-        const json = (await res.json()) as SearchResponse;
+        const json = (await res.json()) as SearchResponseWithScope;
         setData(json);
         setPage(p);
         setSelected(new Set());
@@ -76,6 +92,17 @@ function SearchPageInner() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialQ]);
+
+  // Re-run the current search when the user flips the top-bar selector so
+  // the displayed results always match the active data source. We key off
+  // the serialized scope so rapid toggles coalesce.
+  const scopeKey = useMemo(() => JSON.stringify(active.scope), [active.scope]);
+  useEffect(() => {
+    if (keyword && !active.loading) {
+      runSearch(keyword, 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey]);
 
   const handleSubmit = useCallback(
     (kw: string) => {
@@ -147,6 +174,11 @@ function SearchPageInner() {
           results: targets,
           dataQuality: data.dataQuality,
           providerName: data.providerName,
+          // The export history table lives or dies on knowing which scope
+          // produced each export; carry it through explicitly instead of
+          // re-deriving server-side (which would miss the "demo fallback
+          // after orphan" case).
+          datasetScope: data.datasetScope,
           params: { keyword, sort, contentType, aiFilter },
         }),
       });
@@ -210,8 +242,12 @@ function SearchPageInner() {
 
         {data && (
           <>
-            <DataQualityBanner
-              level={data.dataQuality}
+            <DataSourceBanner
+              scope={data.datasetScope ?? active.scope}
+              datasetName={data.datasetName ?? active.datasetName}
+              hasAnyDatasets={data.hasAnyDatasets ?? active.hasAnyDatasets}
+              reason={data.scopeReason ?? active.reason}
+              dataQuality={data.dataQuality}
               providerName={data.providerName}
             />
 
@@ -234,19 +270,32 @@ function SearchPageInner() {
               exporting={exporting}
             />
 
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {sortedResults.map((asset) => (
-                <ResultCard
-                  key={asset.id}
-                  asset={asset}
-                  isFavorited={isFavorited(asset.id)}
-                  onToggleFavorite={toggleFavorite}
-                  selected={selected.has(asset.id)}
-                  onToggleSelected={toggleSelected}
-                  dataQuality={data.dataQuality}
-                />
-              ))}
-            </div>
+            {data.results.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-border bg-card p-10 text-center">
+                <p className="text-sm font-medium">
+                  No results for <span className="text-foreground">{keyword}</span>
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {data.datasetScope?.kind === "specific"
+                    ? "This dataset has no assets matching that query. Switch to All datasets from the top-bar selector to search across your other imports."
+                    : "Try a different keyword or broaden your filters."}
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {sortedResults.map((asset) => (
+                  <ResultCard
+                    key={asset.id}
+                    asset={asset}
+                    isFavorited={isFavorited(asset.id)}
+                    onToggleFavorite={toggleFavorite}
+                    selected={selected.has(asset.id)}
+                    onToggleSelected={toggleSelected}
+                    dataQuality={data.dataQuality}
+                  />
+                ))}
+              </div>
+            )}
 
             <Pagination
               page={page}
@@ -258,10 +307,17 @@ function SearchPageInner() {
 
         {!loading && !data && !error && (
           <div className="space-y-4">
-            <DataQualityBanner
-              level="demo"
-              providerName="Mock data provider"
-              message="Search results are generated for demo purposes. Numbers shown for downloads, performance score, and competition do not reflect real Adobe Stock metrics."
+            <DataSourceBanner
+              scope={active.scope}
+              datasetName={active.datasetName}
+              hasAnyDatasets={active.hasAnyDatasets}
+              reason={active.reason}
+              providerName={
+                active.scope.kind === "demo"
+                  ? "Mock data provider"
+                  : "User imported data"
+              }
+              dataQuality={active.scope.kind === "demo" ? "demo" : "verified"}
             />
             <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center text-muted-foreground">
               <p className="text-sm">
