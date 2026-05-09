@@ -1,5 +1,7 @@
 import { type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DataQualityBadge } from "@/components/ui/data-quality";
+import type { DataQuality } from "@/types/search";
 
 interface StatCardProps {
   icon: LucideIcon;
@@ -7,6 +9,8 @@ interface StatCardProps {
   value: string | number;
   hint?: string;
   tone?: "blue" | "orange" | "teal" | "purple" | "navy" | "rose";
+  /** Quality tier of the metric. Pass `undefined` to skip the badge. */
+  dataQuality?: DataQuality;
 }
 
 const tones: Record<NonNullable<StatCardProps["tone"]>, string> = {
@@ -24,14 +28,18 @@ export function StatCard({
   value,
   hint,
   tone = "blue",
+  dataQuality,
 }: StatCardProps) {
   return (
     <div className="rounded-xl border border-border/60 bg-card p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs uppercase tracking-wide text-muted-foreground">
-            {label}
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="text-xs uppercase tracking-wide text-muted-foreground">
+              {label}
+            </p>
+            {dataQuality ? <DataQualityBadge level={dataQuality} size="xs" /> : null}
+          </div>
           <p className="mt-1 text-2xl font-semibold tracking-tight text-navy">
             {value}
           </p>

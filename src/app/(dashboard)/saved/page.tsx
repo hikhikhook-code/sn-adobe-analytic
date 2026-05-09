@@ -7,6 +7,11 @@ import { PageHeader } from "@/components/layout/page-header";
 import { useFavorites } from "@/hooks/use-favorites";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  DataQualityBadge,
+  DataQualityBanner,
+} from "@/components/ui/data-quality";
 import { formatNumber, timeAgo } from "@/lib/utils";
 
 export default function SavedPage() {
@@ -18,7 +23,7 @@ export default function SavedPage() {
         title="Saved"
         subtitle="Assets you've favorited across searches"
       />
-      <div className="p-6">
+      <div className="space-y-6 p-6">
         <PageHeader
           title="Saved assets"
           description="Heart any asset on the search page to keep track of it here."
@@ -29,9 +34,17 @@ export default function SavedPage() {
           }
         />
 
+        <DataQualityBanner
+          level="demo"
+          providerName="Mock data provider"
+          message="Saved-asset numbers were captured from the demo data shown on the search page. They are not real Adobe Stock metrics."
+        />
+
         {!loaded ? (
-          <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center text-sm text-muted-foreground">
-            Loading...
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <Skeleton key={i} className="h-72 w-full rounded-xl" />
+            ))}
           </div>
         ) : favorites.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-border bg-card p-12 text-center">
@@ -87,9 +100,10 @@ export default function SavedPage() {
                 </div>
                 <div className="space-y-2 p-3">
                   <p className="line-clamp-2 text-sm font-medium">{f.title}</p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="accent">{formatNumber(f.downloads)} dl</Badge>
                     <Badge variant="warning">{f.performanceScore}/100</Badge>
+                    <DataQualityBadge level="demo" size="xs" />
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {f.contributorName ?? "Unknown"} · saved{" "}

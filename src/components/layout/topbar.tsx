@@ -1,9 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { Search, Bell } from "lucide-react";
+import { Search, Bell, Menu } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { useSidebar } from "@/components/layout/sidebar-context";
 
 interface TopBarProps {
   title?: string;
@@ -12,17 +13,30 @@ interface TopBarProps {
 
 export function TopBar({ title, subtitle }: TopBarProps) {
   const router = useRouter();
+  const { toggle } = useSidebar();
 
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-border/40 bg-card/60 px-6 py-4 backdrop-blur">
-      <div className="min-w-0">
+    <div className="sticky top-0 z-20 flex items-center gap-3 border-b border-border/40 bg-card/80 px-4 py-3 backdrop-blur sm:px-6 sm:py-4">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label="Open menu"
+        className="lg:hidden"
+        onClick={toggle}
+      >
+        <Menu className="h-5 w-5" />
+      </Button>
+      <div className="min-w-0 flex-1">
         {title && (
-          <h1 className="truncate text-lg font-semibold tracking-tight">
+          <h1 className="truncate text-base font-semibold tracking-tight sm:text-lg">
             {title}
           </h1>
         )}
         {subtitle && (
-          <p className="truncate text-sm text-muted-foreground">{subtitle}</p>
+          <p className="truncate text-xs text-muted-foreground sm:text-sm">
+            {subtitle}
+          </p>
         )}
       </div>
       <form

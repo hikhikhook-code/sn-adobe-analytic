@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # Skip postinstall's `prisma generate` here — we run it explicitly below
+          # so failures show up as their own step.
+          PRISMA_SKIP_POSTINSTALL_GENERATE: "true"
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: "file:./dev.db"
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+        env:
+          DATABASE_URL: "file:./dev.db"
+          NEXTAUTH_SECRET: "ci-build-secret-not-used-at-runtime"
+          NEXTAUTH_URL: "http://localhost:3000"
+          DATA_PROVIDER: "mock"
+          USE_LIVE_SCRAPER: "false"
