@@ -13,7 +13,6 @@ import {
 } from "./types";
 import type {
   DataProvider,
-  ProviderContext,
   ProviderContributorResult,
   ProviderHeatmapResult,
   ProviderSearchRequest,
