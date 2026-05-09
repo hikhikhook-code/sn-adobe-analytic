@@ -22,6 +22,27 @@ model User {
   plan              String    @default("FREE") // FREE | STARTER | PRO | ANNUAL
   searchesUsedToday Int       @default(0)
   searchResetAt     DateTime  @default(now())
+  // Which imported dataset powers this user's Search/Dashboard/Portfolio/
+  // Heat Map/Trending/Export views.
+  //
+  // Semantics:
+  //   null              -> "all datasets" (aggregate across every
+  //                        non-archived dataset the user owns). This is
+  //                        the default for a fresh account and the state
+  //                        we fall back to if the id below becomes
+  //                        orphaned (archived/deleted/other user).
+  //   "__demo__"        -> explicit opt-in to the mock provider even when
+  //                        the user has imported datasets.
+  //   <datasetId>       -> scope all queries to that single dataset. We
+  //                        re-verify ownership + archived=false on every
+  //                        read. If the check fails we silently fall back
+  //                        to "all datasets" and clear this field so the
+  //                        user doesn't get stuck on a ghost dataset.
+  //
+  // NOT a foreign key on purpose — we want the column to keep its string
+  // value even if the referenced dataset is hard-deleted, and we don't
+  // want a cascade to wipe the user row.
+  activeDatasetId   String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -151,6 +172,14 @@ model ExportHistory {
   rowCount     Int
   dataQuality  String   @default("demo") // "demo" | "estimated" | "public_metadata" | "verified"
   providerName String   @default("Mock data provider")
+  // Dataset scope snapshot at export time. Lets the history row survive
+  // a later archive/delete — the audit entry stays accurate.
+  // Values: "all_datasets" | "selected_dataset" | "demo_data".
+  datasetScope String   @default("demo_data")
+  // Non-FK pointer (ImportedDataset might be deleted later); only set when
+  // datasetScope = "selected_dataset". See User.activeDatasetId for why
+  // we deliberately avoid a cascading FK.
+  datasetId    String?
   fileUrl      String?
   paramsJson   String   @default("{}") // serialized request payload to support "download again"
   createdAt    DateTime @default(now())
@@ -167,8 +196,16 @@ model ImportedDataset {
   id          String   @id @default(cuid())
   userId      String
   name        String
+  // Original filename the user uploaded (e.g. "q3-2025-adobe.csv"). Shown
+  // on the /import management table so the user can tell two identically
+  // named datasets apart. Optional because old rows predate this column.
+  originalFileName String?
   source      String   @default("csv") // "csv" | "json"
   rowCount    Int      @default(0)
+  // Rows that the importer couldn't normalize (bad numbers, bad dates, etc).
+  // The import still succeeds — we just record how many rows were dropped
+  // so the user can see `rowCount` valid / `skippedRowCount` skipped.
+  skippedRowCount Int  @default(0)
   archived    Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
