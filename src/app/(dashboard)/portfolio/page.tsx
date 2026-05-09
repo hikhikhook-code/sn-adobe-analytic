@@ -114,6 +114,18 @@ export default function PortfolioPage() {
               providerName={data.providerName}
             />
 
+            {data.notice ? (
+              <div
+                role="status"
+                className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs text-violet-900"
+              >
+                <p className="font-semibold uppercase tracking-wide">
+                  Partial support · {data.providerName}
+                </p>
+                <p className="mt-0.5 text-[12px] leading-snug">{data.notice}</p>
+              </div>
+            ) : null}
+
             <Card>
               <CardHeader className="flex-row items-center justify-between gap-4 sm:flex">
                 <div>

@@ -23,6 +23,7 @@ import type {
   SearchResponse,
   SortMode,
 } from "@/types/search";
+import type { ProviderCapabilities } from "@/lib/providers/types";
 
 // The /api/search route now echoes back the resolved scope so we can render
 // the banner + export payload without a second fetch. We widen SearchResponse
@@ -32,6 +33,8 @@ interface SearchResponseWithScope extends SearchResponse {
   datasetName?: string | null;
   scopeReason?: DatasetScopeInfo["reason"];
   hasAnyDatasets?: boolean;
+  capabilities?: ProviderCapabilities;
+  notice?: string;
 }
 
 function SearchPageInner() {
@@ -250,6 +253,18 @@ function SearchPageInner() {
               dataQuality={data.dataQuality}
               providerName={data.providerName}
             />
+
+            {data.notice ? (
+              <div
+                role="status"
+                className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs text-violet-900"
+              >
+                <p className="font-semibold uppercase tracking-wide">
+                  Heads up · {data.providerName}
+                </p>
+                <p className="mt-0.5 text-[12px] leading-snug">{data.notice}</p>
+              </div>
+            ) : null}
 
             <ResultsSummary
               totalResults={data.totalResults}

@@ -22,6 +22,11 @@ export interface SearchAsset {
   id: string;
   thumbnailUrl: string;
   title: string;
+  /**
+   * Download count from the data source. May be `0` when the source does
+   * not expose verified downloads (e.g. public-metadata sources). Pair with
+   * `metricsAvailable` to know whether to render the number or "—".
+   */
   downloads: number;
   performanceScore: number;
   downloadsPerMonth: number;
@@ -34,6 +39,13 @@ export interface SearchAsset {
   isAiGenerated: boolean;
   keywords: string[];
   adobeStockUrl: string;
+  /**
+   * When `false`, the source did not provide verified download / performance
+   * metrics for this asset. UI must render `Unavailable` (or "—") instead of
+   * the raw `0` so we never imply we have a real Adobe download number.
+   * Defaults to `true` for back-compat with mock and user-imported data.
+   */
+  metricsAvailable?: boolean;
 }
 
 export interface SearchResponse {
@@ -46,6 +58,10 @@ export interface SearchResponse {
   pageSize: number;
   dataQuality: DataQuality;
   providerName: string;
+  /** Provider key (mock | manual | official). Optional for older callers. */
+  providerId?: string;
+  /** Optional human-readable banner ("Public metadata source not configured"). */
+  notice?: string;
 }
 
 export interface SearchRequest {

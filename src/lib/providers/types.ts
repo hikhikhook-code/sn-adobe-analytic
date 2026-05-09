@@ -34,6 +34,42 @@ export const DATA_QUALITY_DESCRIPTIONS: Record<DataQuality, string> = {
 };
 
 /**
+ * Per-feature support level. Drives the "Coming Soon" / "Provider not
+ * supported" UI hints so users always know what the active provider can
+ * actually deliver.
+ *
+ * - `supported`:    provider can fully serve the feature.
+ * - `partial`:      provider can serve some fields (e.g. metadata only,
+ *                   no download counts). UI should still render but mark
+ *                   missing figures as `Unavailable`.
+ * - `unsupported`:  provider cannot serve this feature. Caller should fall
+ *                   back to another provider or show a "Coming Soon" notice.
+ */
+export type ProviderFeatureSupport = "supported" | "partial" | "unsupported";
+
+/**
+ * Static capabilities map for a provider. Read by the API layer so the
+ * client can render correct affordances without round-tripping through
+ * a search call first.
+ */
+export interface ProviderCapabilities {
+  /** Keyword search by title/keywords/categories. */
+  search: ProviderFeatureSupport;
+  /** Contributor / portfolio lookup. */
+  contributor: ProviderFeatureSupport;
+  /** Niche heatmap aggregation. */
+  heatmap: ProviderFeatureSupport;
+  /** Trending keyword discovery. */
+  trending: ProviderFeatureSupport;
+  /** Reverse / similar image search. */
+  similarImage: ProviderFeatureSupport;
+  /** Whether this provider can return verified download counts. When
+   *  `false`, results should set `metricsAvailable: false` and the UI
+   *  must render `Unavailable` instead of fake zeroes. */
+  downloadsAvailable: boolean;
+}
+
+/**
  * Optional user-scoped context passed by the API layer. Providers that serve
  * per-user data (e.g. `manualImportProvider`) read this. Providers that don't
  * care (e.g. `mockProvider`) ignore it.
@@ -54,17 +90,35 @@ export interface ProviderSearchRequest {
   page?: number;
 }
 
-export interface ProviderSearchResult {
+/**
+ * Common envelope fields shared across every provider response. Lets the
+ * UI render the same banner / notice / capability machinery regardless of
+ * which provider answered.
+ */
+export interface ProviderResultEnvelope {
+  dataQuality: DataQuality;
+  providerName: string;
+  /** Stable provider key matching `DataProvider.id` (mock | manual | official). */
+  providerId?: string;
+  /** Capabilities of the provider that produced this response. */
+  capabilities?: ProviderCapabilities;
+  /**
+   * Optional human-readable message describing limitations of this
+   * response — e.g. "Public metadata source not configured" or
+   * "Downloads unavailable from this source". Surfaced verbatim in the UI.
+   */
+  notice?: string;
+}
+
+export interface ProviderSearchResult extends ProviderResultEnvelope {
   totalResults: number;
   competitionLevel: "low" | "medium" | "high";
   aiSaturation: number;
   contentBreakdown: { type: string; count: number }[];
   results: SearchAsset[];
-  dataQuality: DataQuality;
-  providerName: string;
 }
 
-export interface ProviderContributorResult {
+export interface ProviderContributorResult extends ProviderResultEnvelope {
   name: string;
   joinDate: string;
   totalAssets: number;
@@ -75,8 +129,6 @@ export interface ProviderContributorResult {
   topKeywords: { keyword: string; count: number }[];
   monthlyTrend: { month: string; downloads: number }[];
   assets: SearchAsset[];
-  dataQuality: DataQuality;
-  providerName: string;
 }
 
 export interface HeatmapTile {
@@ -87,10 +139,8 @@ export interface HeatmapTile {
   trend: "up" | "down" | "stable";
 }
 
-export interface ProviderHeatmapResult {
+export interface ProviderHeatmapResult extends ProviderResultEnvelope {
   niches: HeatmapTile[];
-  dataQuality: DataQuality;
-  providerName: string;
 }
 
 export interface TrendingKeyword {
@@ -99,10 +149,8 @@ export interface TrendingKeyword {
   growth: number;
 }
 
-export interface ProviderTrendingResult {
+export interface ProviderTrendingResult extends ProviderResultEnvelope {
   trending: TrendingKeyword[];
-  dataQuality: DataQuality;
-  providerName: string;
 }
 
 export interface DataProvider {
@@ -112,6 +160,8 @@ export interface DataProvider {
   readonly name: string;
   /** Quality tag attached to all data this provider returns. */
   readonly dataQuality: DataQuality;
+  /** Static capability map — what features this provider can serve. */
+  readonly capabilities: ProviderCapabilities;
 
   search(
     req: ProviderSearchRequest,
@@ -158,5 +208,40 @@ export class ProviderNotImplementedError extends Error {
         "See README for the data-provider roadmap.",
     );
     this.name = "ProviderNotImplementedError";
+  }
+}
+
+/**
+ * Thrown by a provider that intentionally does not implement a particular
+ * feature (e.g. the public-metadata provider has no Similar Image Search).
+ * The runProvider() wrapper treats this the same as NotImplemented and
+ * falls back to mock; the API layer can also surface it as a "Coming Soon"
+ * hint when paired with `capabilities[feature] === "unsupported"`.
+ */
+export class ProviderFeatureUnsupportedError extends Error {
+  readonly feature: keyof ProviderCapabilities;
+  constructor(providerId: string, feature: keyof ProviderCapabilities) {
+    super(
+      `Provider '${providerId}' does not support feature '${String(feature)}'. ` +
+        "Falling back to the mock provider.",
+    );
+    this.name = "ProviderFeatureUnsupportedError";
+    this.feature = feature;
+  }
+}
+
+/**
+ * Thrown by a provider that requires external configuration (e.g. an API
+ * base URL or key) that hasn't been set. The runProvider() wrapper treats
+ * this like NotImplemented and falls back to the mock provider so the app
+ * stays usable even before the operator has wired up real credentials.
+ */
+export class ProviderNotConfiguredError extends Error {
+  constructor(providerId: string, detail?: string) {
+    super(
+      `Provider '${providerId}' is not configured${detail ? ` (${detail})` : ""}. ` +
+        "Falling back to the mock provider.",
+    );
+    this.name = "ProviderNotConfiguredError";
   }
 }

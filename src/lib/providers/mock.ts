@@ -9,6 +9,7 @@ import { RESULTS_PER_PAGE } from "@/lib/constants";
 import type { SearchAsset } from "@/types/search";
 import type {
   DataProvider,
+  ProviderCapabilities,
   ProviderContributorResult,
   ProviderHeatmapResult,
   ProviderSearchRequest,
@@ -18,6 +19,21 @@ import type {
 
 const PROVIDER_ID = "mock";
 const PROVIDER_NAME = "Mock data provider";
+
+const CAPABILITIES: ProviderCapabilities = {
+  search: "supported",
+  contributor: "supported",
+  heatmap: "supported",
+  trending: "supported",
+  // Similar Image Search has no demo data path; we mark it unsupported so
+  // the UI shows "Coming Soon" rather than fake similar-images.
+  similarImage: "unsupported",
+  // Mock numbers ARE provided, but they're synthetic — `dataQuality: "demo"`
+  // already communicates this. We still return `metricsAvailable: true` so
+  // the UI renders the figures; the demo badge is what tells the user not
+  // to trust them as real Adobe data.
+  downloadsAvailable: true,
+};
 
 function applyFilters(results: SearchAsset[], req: ProviderSearchRequest) {
   let out = results;
@@ -65,10 +81,15 @@ function contentBreakdown(results: SearchAsset[]) {
     .sort((a, b) => b.count - a.count);
 }
 
+function withMetricsAvailable(assets: SearchAsset[]): SearchAsset[] {
+  return assets.map((a) => ({ ...a, metricsAvailable: true }));
+}
+
 export const mockProvider: DataProvider = {
   id: PROVIDER_ID,
   name: PROVIDER_NAME,
   dataQuality: "demo",
+  capabilities: CAPABILITIES,
 
   async search(req) {
     const page = req.page ?? 1;
@@ -79,15 +100,16 @@ export const mockProvider: DataProvider = {
     );
     const filtered = applyFilters(results, req);
     const sorted = applySort(filtered, req);
-    const competitionLevel = calculateCompetitionLevel(totalResults);
     const out: ProviderSearchResult = {
       totalResults,
-      competitionLevel,
+      competitionLevel: calculateCompetitionLevel(totalResults),
       aiSaturation: aiSaturation(sorted),
       contentBreakdown: contentBreakdown(sorted),
-      results: sorted,
+      results: withMetricsAvailable(sorted),
       dataQuality: "demo",
       providerName: PROVIDER_NAME,
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
     };
     return out;
   },
@@ -104,9 +126,11 @@ export const mockProvider: DataProvider = {
       contentBreakdown: c.contentBreakdown,
       topKeywords: c.topKeywords,
       monthlyTrend: c.monthlyDownloads,
-      assets: c.assets,
+      assets: withMetricsAvailable(c.assets),
       dataQuality: "demo",
       providerName: PROVIDER_NAME,
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
     };
     return out;
   },
@@ -116,6 +140,8 @@ export const mockProvider: DataProvider = {
       niches: HEATMAP_NICHES,
       dataQuality: "demo",
       providerName: PROVIDER_NAME,
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
     } satisfies ProviderHeatmapResult;
   },
 
@@ -124,6 +150,8 @@ export const mockProvider: DataProvider = {
       trending: TRENDING_KEYWORDS,
       dataQuality: "demo",
       providerName: PROVIDER_NAME,
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
     } satisfies ProviderTrendingResult;
   },
 };

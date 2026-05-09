@@ -38,6 +38,12 @@ export function ResultCard({
   const [showAllKeywords, setShowAllKeywords] = useState(false);
   const [showAllTitle, setShowAllTitle] = useState(false);
 
+  // Per-asset gate. The provider sets `metricsAvailable: false` when its
+  // source can't supply verified download counts (e.g. public-metadata).
+  // Render `—` + "Unavailable" instead of `0` so we never imply we have a
+  // real Adobe download number.
+  const hasMetrics = asset.metricsAvailable !== false;
+
   const keywordsShown = showAllKeywords ? asset.keywords : asset.keywords.slice(0, 6);
 
   function copyTitle() {
@@ -147,9 +153,21 @@ export function ResultCard({
                 className="!border-white/40 !bg-white/15 !text-white"
               />
             </div>
-            <p className="mt-0.5 text-lg font-bold leading-tight">
-              {formatNumber(asset.downloads)}
-            </p>
+            {hasMetrics ? (
+              <p className="mt-0.5 text-lg font-bold leading-tight">
+                {formatNumber(asset.downloads)}
+              </p>
+            ) : (
+              <>
+                <p className="mt-0.5 text-lg font-bold leading-tight">—</p>
+                <p
+                  className="text-[10px] opacity-80"
+                  title="The current data provider does not expose verified download counts."
+                >
+                  Unavailable
+                </p>
+              </>
+            )}
           </div>
           <div className="rounded-lg bg-gradient-to-br from-orange-500 to-rose-500 p-3 text-white">
             <div className="flex items-center justify-between gap-1">
@@ -163,13 +181,27 @@ export function ResultCard({
                 className="!border-white/40 !bg-white/15 !text-white"
               />
             </div>
-            <p className="mt-0.5 text-lg font-bold leading-tight">
-              {asset.performanceScore}
-              <span className="text-xs font-normal opacity-80">/100</span>
-            </p>
-            <p className="text-[10px] opacity-80">
-              ~{asset.downloadsPerMonth}/mo
-            </p>
+            {hasMetrics ? (
+              <>
+                <p className="mt-0.5 text-lg font-bold leading-tight">
+                  {asset.performanceScore}
+                  <span className="text-xs font-normal opacity-80">/100</span>
+                </p>
+                <p className="text-[10px] opacity-80">
+                  ~{asset.downloadsPerMonth}/mo
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="mt-0.5 text-lg font-bold leading-tight">—</p>
+                <p
+                  className="text-[10px] opacity-80"
+                  title="Performance score is derived from downloads, which are unavailable for this source."
+                >
+                  Unavailable
+                </p>
+              </>
+            )}
           </div>
         </div>
 
@@ -199,12 +231,12 @@ export function ResultCard({
           </a>
           <button
             type="button"
-            className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+            className="inline-flex items-center gap-1 text-muted-foreground/70"
             disabled
-            title="Phase 2"
+            title="Similar Image Search is not supported by the current data provider yet (Coming Soon)."
           >
             <ImageIcon className="h-3.5 w-3.5" />
-            Find similar
+            Find similar — Coming Soon
           </button>
         </div>
 

@@ -40,5 +40,9 @@ export async function POST(req: Request) {
     datasetName: scopeInfo.datasetName ?? null,
     scopeReason: scopeInfo.reason,
     hasAnyDatasets: scopeInfo.hasAnyDatasets,
+    // result already carries providerId, capabilities, and notice via the
+    // ProviderResultEnvelope; spreading above forwards them. Listed here
+    // as a reminder that the portfolio page reads these to render its
+    // partial-supported state when the official provider isn't configured.
   });
 }
