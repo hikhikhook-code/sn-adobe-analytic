@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { FileDown, History } from "lucide-react";
+import { Download, FileDown, History } from "lucide-react";
 
 import { TopBar } from "@/components/layout/topbar";
 import { PageHeader } from "@/components/layout/page-header";
@@ -121,24 +121,27 @@ export default function ExportPage() {
                         <th className="px-3 py-2 font-semibold">Type</th>
                         <th className="px-3 py-2 font-semibold">Query / dataset</th>
                         <th className="px-3 py-2 font-semibold">Rows</th>
-                        <th className="px-3 py-2 font-semibold">Quality</th>
+                        <th className="px-3 py-2 font-semibold">Quality &amp; provider</th>
                         <th className="px-3 py-2 font-semibold">Generated</th>
+                        <th className="px-3 py-2 text-right font-semibold">
+                          Actions
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
                       {exports.map((e) => (
                         <tr key={e.id} className="border-t border-border">
-                          <td className="px-3 py-2">
+                          <td className="px-3 py-2 whitespace-nowrap">
                             {TYPE_LABELS[e.type] ?? e.type}
                           </td>
                           <td className="px-3 py-2 max-w-[260px] truncate">
                             <span title={e.query}>{e.query || "(unnamed)"}</span>
                           </td>
-                          <td className="px-3 py-2 text-muted-foreground">
+                          <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
                             {formatNumber(e.rowCount)}
                           </td>
                           <td className="px-3 py-2">
-                            <div className="flex flex-wrap items-center gap-2">
+                            <div className="flex flex-col gap-1">
                               <DataQualityBadge
                                 level={e.dataQuality}
                                 size="xs"
@@ -148,8 +151,38 @@ export default function ExportPage() {
                               </span>
                             </div>
                           </td>
-                          <td className="px-3 py-2 text-muted-foreground">
+                          <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
                             {timeAgo(e.createdAt)}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {/*
+                              "Download again" is intentionally disabled in
+                              Phase 4. Re-generating a CSV reliably requires
+                              us to replay the exact provider + parameters
+                              that produced the original file — provider
+                              state, mock seeding, and imported dataset
+                              membership all drift over time. Surfacing a
+                              button that might silently return different
+                              rows would break the data-quality promise, so
+                              we keep it visible but clearly labeled as
+                              coming-soon until we back it with stored
+                              artifacts.
+                            */}
+                            <div className="flex flex-col items-end gap-1">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled
+                                aria-disabled="true"
+                                title="Re-download of past exports is coming soon"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                Download again
+                              </Button>
+                              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                                Coming soon
+                              </span>
+                            </div>
                           </td>
                         </tr>
                       ))}
