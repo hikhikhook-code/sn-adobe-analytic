@@ -4,6 +4,14 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { runSearch } from "@/lib/providers";
+import { parseDatasetScope, resolveDatasetScope } from "@/lib/dataset-scope";
+
+const ScopeSchema = z
+  .object({
+    kind: z.enum(["all", "specific", "demo"]),
+    datasetId: z.string().optional(),
+  })
+  .optional();
 
 const SearchSchema = z.object({
   keyword: z.string().min(1).max(200),
@@ -15,6 +23,13 @@ const SearchSchema = z.object({
     .optional(),
   aiFilter: z.enum(["all", "ai_only", "exclude_ai"]).optional(),
   page: z.number().int().min(1).max(50).optional(),
+  /**
+   * Optional per-request override of the user's stored dataset preference.
+   * Useful when a page wants to force a specific scope for a single query
+   * without flipping the global selector. Invalid/foreign datasetIds fall
+   * back to the user's stored preference (see resolveDatasetScope).
+   */
+  datasetScope: ScopeSchema,
 });
 
 export async function POST(req: Request) {
@@ -35,7 +50,14 @@ export async function POST(req: Request) {
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
 
-  const result = await runSearch(data, { userId });
+  const scopeInfo = await resolveDatasetScope(
+    userId,
+    parseDatasetScope(data.datasetScope),
+  );
+  const result = await runSearch(data, {
+    userId,
+    datasetScope: scopeInfo.scope,
+  });
 
   // Best-effort search history logging — never block the response on it.
   if (userId) {
@@ -63,5 +85,11 @@ export async function POST(req: Request) {
     pageSize: result.results.length,
     dataQuality: result.dataQuality,
     providerName: result.providerName,
+    // Echo the scope back so the search page can render the right banner
+    // without making a separate /api/user/active-dataset call.
+    datasetScope: scopeInfo.scope,
+    datasetName: scopeInfo.datasetName ?? null,
+    scopeReason: scopeInfo.reason,
+    hasAnyDatasets: scopeInfo.hasAnyDatasets,
   });
 }

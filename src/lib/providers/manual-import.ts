@@ -6,6 +6,7 @@ import {
 } from "@/lib/scoring";
 import { RESULTS_PER_PAGE } from "@/lib/constants";
 import type { SearchAsset } from "@/types/search";
+import type { DatasetScope } from "@/lib/dataset-scope";
 import {
   ProviderNoDataError,
   ProviderRequiresUserError,
@@ -95,14 +96,44 @@ function toSearchAsset(row: ImportedAssetRow): SearchAsset {
   };
 }
 
-async function loadUserAssets(userId: string): Promise<ImportedAssetRow[]> {
-  const datasets = await prisma.importedDataset.findMany({
-    where: { userId, archived: false },
-    select: { id: true },
-  });
-  if (datasets.length === 0) return [];
+async function loadUserAssets(
+  userId: string,
+  scope?: DatasetScope,
+): Promise<ImportedAssetRow[]> {
+  // Ownership check is belt-and-braces: even if the caller forgot to
+  // resolve scope, we only ever look at datasets that belong to this user
+  // and aren't archived. One dev mistake can't leak another user's data.
+  let datasetIds: string[];
+  if (scope?.kind === "specific") {
+    const owned = await prisma.importedDataset.findFirst({
+      where: {
+        id: scope.datasetId,
+        userId,
+        archived: false,
+      },
+      select: { id: true },
+    });
+    if (!owned) {
+      // Specific dataset no longer accessible to this user. Treat as
+      // "no data" so the caller falls back to mock via runProvider(),
+      // rather than silently broadening to all datasets (that would
+      // surprise a user who had explicitly picked one).
+      throw new ProviderNoDataError(
+        PROVIDER_ID,
+        "selected dataset is no longer available",
+      );
+    }
+    datasetIds = [owned.id];
+  } else {
+    const owned = await prisma.importedDataset.findMany({
+      where: { userId, archived: false },
+      select: { id: true },
+    });
+    datasetIds = owned.map((d) => d.id);
+  }
+  if (datasetIds.length === 0) return [];
   return prisma.importedAsset.findMany({
-    where: { datasetId: { in: datasets.map((d) => d.id) } },
+    where: { datasetId: { in: datasetIds } },
     orderBy: { createdAt: "desc" },
   });
 }
@@ -179,7 +210,7 @@ export const manualImportProvider: DataProvider = {
 
   async search(req, ctx) {
     if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
-    const rows = await loadUserAssets(ctx.userId);
+    const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
     if (rows.length === 0) throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
     const all = rows.map(toSearchAsset);
     const matched = all.filter((a) => matchesKeyword(a, req.keyword));
@@ -201,7 +232,7 @@ export const manualImportProvider: DataProvider = {
 
   async contributor(query, ctx) {
     if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
-    const rows = await loadUserAssets(ctx.userId);
+    const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
     if (rows.length === 0) throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
     const assets = rows.map(toSearchAsset);
     const q = query.trim().toLowerCase();
@@ -281,7 +312,7 @@ export const manualImportProvider: DataProvider = {
 
   async heatmap(ctx) {
     if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
-    const rows = await loadUserAssets(ctx.userId);
+    const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
     if (rows.length === 0) throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
     const assets = rows.map(toSearchAsset);
     // Group by keyword. Each keyword tile aggregates downloads + asset count
@@ -346,7 +377,7 @@ export const manualImportProvider: DataProvider = {
 
   async trending(ctx) {
     if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
-    const rows = await loadUserAssets(ctx.userId);
+    const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
     if (rows.length === 0) throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
     const assets = rows.map(toSearchAsset);
     const now = Date.now();

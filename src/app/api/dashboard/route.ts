@@ -2,13 +2,20 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { resolveDatasetScope, scopedDatasetIds } from "@/lib/dataset-scope";
 
 /**
  * GET /api/dashboard — top-of-page activity counters + recent searches.
  *
- * Anonymous callers get all-zero counters and a `signedIn:false` flag so the
- * dashboard renders without errors but tells the user to sign in for real
- * stats.
+ * The imported-asset counter respects the user's dataset scope, so the
+ * dashboard number matches what they'll see in Search / Portfolio / etc.
+ * Everything else (saved, exports, tracked contributors) is account-wide
+ * regardless of scope — that matches the heuristic "my activity across
+ * the whole app", not "my activity against this dataset".
+ *
+ * Anonymous callers get all-zero counters and a `signedIn:false` flag so
+ * the dashboard renders without errors but tells the user to sign in for
+ * real stats.
  */
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -22,6 +29,10 @@ export async function GET() {
       savedAssets: 0,
       exportsMade: 0,
       trackedContributors: 0,
+      importedAssets: 0,
+      datasetScope: { kind: "demo" },
+      datasetName: null,
+      scopeReason: "guest",
       recentSearches: [],
     });
   }
@@ -29,12 +40,27 @@ export async function GET() {
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
 
+  const scopeInfo = await resolveDatasetScope(userId);
+
+  // Count imported assets within the current dataset scope. "demo" scope
+  // -> 0 (even if the user has datasets, they asked to see demo data).
+  // Any other scope -> sum of matching assets. Ownership is guaranteed
+  // because scopedDatasetIds filters on userId.
+  let importedAssets = 0;
+  if (scopeInfo.scope.kind !== "demo") {
+    const datasetIds = await scopedDatasetIds(userId, scopeInfo.scope);
+    if (datasetIds.length > 0) {
+      importedAssets = await prisma.importedAsset.count({
+        where: { datasetId: { in: datasetIds } },
+      });
+    }
+  }
+
   const [
     searchesToday,
     savedAssets,
     exportsMade,
     trackedContributors,
-    importedDatasets,
     recentSearches,
   ] = await Promise.all([
     prisma.searchHistory.count({
@@ -51,7 +77,6 @@ export async function GET() {
         distinct: ["contributorName"],
       })
       .then((rows) => rows.length),
-    prisma.importedDataset.count({ where: { userId, archived: false } }),
     prisma.searchHistory.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
@@ -70,11 +95,15 @@ export async function GET() {
 
   return NextResponse.json({
     signedIn: true,
-    hasImportedData: importedDatasets > 0,
+    hasImportedData: scopeInfo.hasAnyDatasets,
     searchesToday,
     savedAssets,
     exportsMade,
     trackedContributors,
+    importedAssets,
+    datasetScope: scopeInfo.scope,
+    datasetName: scopeInfo.datasetName ?? null,
+    scopeReason: scopeInfo.reason,
     recentSearches,
   });
 }

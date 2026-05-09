@@ -80,6 +80,26 @@ export async function selectProvider(
     return mockProvider;
   }
 
+  // Explicit demo scope bypasses auto-promotion. A signed-in user who has
+  // imported data but deliberately chose "Using demo data" must actually
+  // see demo data.
+  if (ctx?.datasetScope?.kind === "demo") {
+    return mockProvider;
+  }
+
+  // If the caller already resolved a concrete dataset scope (either "all"
+  // with at least one dataset, or "specific"), skip the extra DB round-trip
+  // and jump straight to the manual provider. The caller has already done
+  // the ownership and existence checks.
+  if (
+    picked.id === "mock" &&
+    ctx?.userId &&
+    (ctx.datasetScope?.kind === "specific" ||
+      ctx.datasetScope?.kind === "all")
+  ) {
+    return manualImportProvider;
+  }
+
   // Auto-promote: if the user has imported data, prefer manual even when
   // DATA_PROVIDER=mock. The user can still force `DATA_PROVIDER=mock` via
   // env if they want demo data, but the default should let imported data

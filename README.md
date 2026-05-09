@@ -40,7 +40,7 @@ niche heat maps, and export results to CSV.
     Heat Map / Trending / Saved / Export for the signed-in user (zero-config)
   - Persisted search history surfaced on the dashboard
   - Completed `/export` with history table + per-export quality tagging
-- **Phase 4 (this PR)** — Supabase / Postgres + Vercel deploy readiness:
+- **Phase 4** — Supabase / Postgres + Vercel deploy readiness:
   - Centralized env loading & validation in `src/lib/env.ts` (strict in
     production, permissive in local dev and during CI builds)
   - `docs/DEPLOYMENT.md` — end-to-end Vercel + Supabase deploy guide with
@@ -54,7 +54,22 @@ niche heat maps, and export results to CSV.
     `MAX_IMPORT_FILE_SIZE_MB`
   - `/export` history table gains an "Actions" column with a clearly
     disabled "Download again" button (re-download is deferred)
-- **Phase 4+** (still deferred) — official Adobe data source, similar-image
+- **Phase 6 (this PR)** — Dataset Selector + Import Management:
+  - Dataset picker in the top bar, visible on every dashboard route
+  - Three scopes: **All imported datasets** (aggregate), **Selected
+    dataset** (single-dataset scope), **Demo data** (explicit mock)
+  - Per-user persistence via `User.activeDatasetId`; orphaned selections
+    (archived/deleted) silently fall back to "All datasets" with a warning
+    banner
+  - New `DataSourceBanner` on every analytics page clearly says what
+    data source is active
+  - `/import` gains a full management table: rename, archive, hard-delete,
+    set active, plus source filename + skipped-row count
+  - `/api/export` and `ExportHistory` record the dataset scope per export
+    so history rows stay accurate after renames or archives
+  - User isolation guardrails: every scope resolution re-verifies
+    dataset ownership server-side before trusting a specific id
+- **Phase 6+** (still deferred) — official Adobe data source, similar-image
   search, pricing flow.
 
 ## Tech stack
@@ -287,6 +302,73 @@ Every CSV download from anywhere in the app inserts a row into
 `ExportHistory` for the signed-in user. The `/export` page lists the most
 recent 100 exports with the data-quality tag from when they were generated
 (so you can tell at a glance which past exports were demo vs verified).
+
+## Dataset selection (Phase 6)
+
+Once a user has imported one or more CSVs they can pick **which dataset
+powers every analytics surface**. The selector lives in the top bar and is
+visible on every dashboard route (`/search`, `/dashboard`, `/portfolio`,
+`/heatmap`, `/trending`, `/export`, `/import`, `/saved`).
+
+There are exactly three scopes:
+
+| Scope | Banner text | Behavior |
+| --- | --- | --- |
+| **All imported datasets** | "Using all imported datasets" | Queries aggregate across every non-archived dataset the user owns. Default when the user signs in. |
+| **Selected dataset** | "Using dataset: &lt;name&gt;" | Scoped to one dataset. Search / Dashboard / Portfolio / Heat Map / Trending / Export all see *only* that dataset's rows. |
+| **Demo data** | "Using demo data" | Forces the mock provider even when the user has imported data. Useful for demos / screenshots. |
+
+When the user has **no imported datasets yet**, the banner shows
+"No imported data yet" (a UI-only variant of the "demo" state) and offers
+a CTA to `/import`.
+
+### Persistence
+
+The selection is persisted per user in `User.activeDatasetId`:
+
+- `NULL` → "All imported datasets" (the default for a new account).
+- `"__demo__"` → explicit demo scope.
+- any other string → the concrete dataset id.
+
+Scope resolution (`src/lib/dataset-scope.ts`) always re-verifies ownership
+and `archived = false` before trusting a specific id. **User isolation is
+enforced at every API entry point** — User A can never resolve to User B's
+dataset even if they craft a malicious request with that id.
+
+### Archive vs. delete
+
+From the management table on `/import`:
+
+- **Archive** (soft-delete) — the dataset is hidden from search / selector
+  but its rows stay in the database. The user can re-import a CSV with
+  the same shape to recreate it.
+- **Delete** (hard) — permanently removes the dataset and all its
+  `ImportedAsset` rows. Irreversible.
+
+In both cases, if the archived/deleted dataset was the user's **active
+selection**, the API atomically clears `User.activeDatasetId` in the same
+transaction, so the user doesn't get stuck pointing at a ghost. On the
+next page load they see the amber "Your selected dataset is no longer
+available" warning banner and are implicitly back on "All datasets".
+
+### Rename
+
+Rename is a simple `PATCH /api/import/:id` — it updates `name` only.
+Export-history rows that reference the old name still resolve via
+`datasetId`, so renaming doesn't break past history.
+
+### Export history carries scope
+
+Every CSV you export records the active scope at the moment of export:
+
+- `all_datasets` — aggregate export
+- `selected_dataset` — with the concrete `datasetId` snapshot
+- `demo_data` — mock export
+
+The `/export` history table surfaces this as "Dataset: Q3 2025" /
+"All imported datasets" / "Demo data", so you can later tell which
+historical CSV came from which scope — even after you archive or
+rename the dataset.
 
 ## Implemented in Phase 1
 

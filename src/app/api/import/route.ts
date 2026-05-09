@@ -12,12 +12,21 @@ const MAX_CSV_BYTES = env.maxImportFileSizeBytes;
 const MAX_CSV_MB = env.maxImportFileSizeMb;
 const ImportSchema = z.object({
   name: z.string().min(1).max(120),
+  // Optional original filename (UI sends file.name). Helps users
+  // distinguish two datasets that ended up with the same display name.
+  originalFileName: z.string().max(260).optional(),
   csv: z.string().min(1).max(MAX_CSV_BYTES),
   mapping: z.record(z.string(), z.enum(IMPORT_FIELDS).nullable()),
 });
 
 /**
  * GET /api/import — list the current user's imported datasets.
+ *
+ * Returns one row per non-archived dataset. Rows include enough metadata
+ * for the management table on /import (original filename, skipped row
+ * count, active flag, archived flag). Callers that only need a lightweight
+ * selector list (id+name+rowCount) should hit /api/user/active-dataset
+ * instead.
  */
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -27,19 +36,38 @@ export async function GET() {
       { status: 401 },
     );
   }
-  const datasets = await prisma.importedDataset.findMany({
-    where: { userId: session.user.id, archived: false },
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      name: true,
-      source: true,
-      rowCount: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+  const [user, datasets] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { activeDatasetId: true },
+    }),
+    prisma.importedDataset.findMany({
+      where: { userId: session.user.id, archived: false },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        originalFileName: true,
+        source: true,
+        rowCount: true,
+        skippedRowCount: true,
+        archived: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+  ]);
+  const activeId = user?.activeDatasetId ?? null;
+  return NextResponse.json({
+    activeDatasetId: activeId,
+    datasets: datasets.map((d) => ({
+      ...d,
+      // Denormalized flag so the UI doesn't have to cross-reference
+      // activeDatasetId on every row.
+      isActive: activeId === d.id,
+      status: d.archived ? "archived" : "active",
+    })),
   });
-  return NextResponse.json({ datasets });
 }
 
 /**
@@ -93,7 +121,7 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const { name, csv, mapping } = parsed.data;
+  const { name, originalFileName, csv, mapping } = parsed.data;
 
   // Reject an empty mapping early so the user sees a clear message rather
   // than the generic "No usable rows" further down.
@@ -126,12 +154,23 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  // A "skipped" row is one the CSV contained but normalizeRows could not
+  // turn into a usable asset (e.g. cell-level parse errors accumulated in
+  // `errors`). `validRows.length` plus skipped should equal totalRows; we
+  // record the skipped count on the dataset so the management table can
+  // display "1,024 rows · 3 skipped" without re-parsing.
+  const skippedRowCount = Math.max(
+    0,
+    allRows.totalRows - validRows.length,
+  );
   const dataset = await prisma.importedDataset.create({
     data: {
       userId: session.user.id,
       name,
+      originalFileName: originalFileName ?? null,
       source: "csv",
       rowCount: validRows.length,
+      skippedRowCount,
       assets: {
         create: validRows.map((r) => ({ ...r })),
       },
@@ -139,7 +178,9 @@ export async function POST(req: Request) {
     select: {
       id: true,
       name: true,
+      originalFileName: true,
       rowCount: true,
+      skippedRowCount: true,
       createdAt: true,
     },
   });

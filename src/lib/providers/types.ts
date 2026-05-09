@@ -4,6 +4,7 @@ import type {
   SearchAsset,
   SortMode,
 } from "@/types/search";
+import type { DatasetScope } from "@/lib/dataset-scope";
 
 /**
  * How trustworthy is this data?
@@ -36,9 +37,13 @@ export const DATA_QUALITY_DESCRIPTIONS: Record<DataQuality, string> = {
  * Optional user-scoped context passed by the API layer. Providers that serve
  * per-user data (e.g. `manualImportProvider`) read this. Providers that don't
  * care (e.g. `mockProvider`) ignore it.
+ *
+ * `datasetScope` — when set, the manual provider narrows its query to that
+ * scope. See `resolveDatasetScope` for how the caller computes it.
  */
 export interface ProviderContext {
   userId?: string;
+  datasetScope?: DatasetScope;
 }
 
 export interface ProviderSearchRequest {
