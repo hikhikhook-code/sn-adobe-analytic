@@ -1,7 +1,21 @@
+import { prisma } from "@/lib/prisma";
 import { mockProvider } from "./mock";
 import { officialAdobeProvider } from "./official-adobe";
 import { manualImportProvider } from "./manual-import";
-import type { DataProvider } from "./types";
+import {
+  ProviderNoDataError,
+  ProviderNotImplementedError,
+  ProviderRequiresUserError,
+} from "./types";
+import type {
+  DataProvider,
+  ProviderContext,
+  ProviderContributorResult,
+  ProviderHeatmapResult,
+  ProviderSearchRequest,
+  ProviderSearchResult,
+  ProviderTrendingResult,
+} from "./types";
 
 const PROVIDERS: Record<string, DataProvider> = {
   mock: mockProvider,
@@ -13,25 +27,31 @@ let warnedAboutLiveScraper = false;
 const warnedAboutMissingProvider: Record<string, boolean> = {};
 
 /**
- * Resolve the current data provider from env.
+ * Resolve the current data provider from env + (optionally) user.
  *
  * Selection order:
  * 1. `DATA_PROVIDER` env var (`mock` | `official` | `manual`); unknown value
  *    → mock with a warning.
- * 2. Default → mock.
+ * 2. **Auto-promote to manual** when:
+ *    - the env var is `mock` (or unset), AND
+ *    - the caller passed a `userId`, AND
+ *    - that user has at least one non-archived imported dataset
+ *    This makes the manual provider feel zero-config: as soon as a user
+ *    imports their own data, they start seeing it.
+ * 3. Default → mock.
  *
  * `USE_LIVE_SCRAPER` is honored ONLY in development. In production it is
  * forced off — we will not silently scrape Adobe Stock from a deployed
  * instance.
  */
-export function selectProvider(): DataProvider {
+export async function selectProvider(
+  ctx?: ProviderContext,
+): Promise<DataProvider> {
   const requested = (process.env.DATA_PROVIDER ?? "mock").toLowerCase();
   const useLive = process.env.USE_LIVE_SCRAPER === "true";
 
   if (useLive) {
     if (process.env.NODE_ENV === "production") {
-      // Hard refuse in production. There is no live scraper implemented; even
-      // if there were, we would not enable it from an env flag.
       if (!warnedAboutLiveScraper) {
         console.warn(
           "[providers] USE_LIVE_SCRAPER=true is ignored in production. " +
@@ -60,15 +80,82 @@ export function selectProvider(): DataProvider {
     return mockProvider;
   }
 
-  // For placeholder providers, the actual fallback to mock happens at call
-  // time (the placeholder methods throw ProviderNotImplementedError).
+  // Auto-promote: if the user has imported data, prefer manual even when
+  // DATA_PROVIDER=mock. The user can still force `DATA_PROVIDER=mock` via
+  // env if they want demo data, but the default should let imported data
+  // win once it exists.
+  if (picked.id === "mock" && ctx?.userId) {
+    try {
+      const datasetCount = await prisma.importedDataset.count({
+        where: { userId: ctx.userId, archived: false },
+      });
+      if (datasetCount > 0) return manualImportProvider;
+    } catch {
+      // Table may not exist yet during a fresh setup — fall through to mock.
+    }
+  }
+
   return picked;
+}
+
+/**
+ * Convenience wrapper: call a provider method and gracefully fall back to
+ * `mockProvider` if the chosen provider can't fulfill the request (not
+ * implemented, requires user, or user has no data yet).
+ */
+export async function runProvider<T>(
+  ctx: ProviderContext | undefined,
+  fn: (p: DataProvider) => Promise<T>,
+): Promise<T> {
+  const provider = await selectProvider(ctx);
+  try {
+    return await fn(provider);
+  } catch (err) {
+    if (
+      err instanceof ProviderNotImplementedError ||
+      err instanceof ProviderRequiresUserError ||
+      err instanceof ProviderNoDataError
+    ) {
+      console.warn(`[providers] ${err.message}`);
+      return fn(mockProvider);
+    }
+    throw err;
+  }
+}
+
+// High-level helpers used by the API routes — these own the provider +
+// fallback dance so route handlers stay tiny.
+export async function runSearch(
+  req: ProviderSearchRequest,
+  ctx?: ProviderContext,
+): Promise<ProviderSearchResult> {
+  return runProvider(ctx, (p) => p.search(req, ctx));
+}
+
+export async function runContributor(
+  query: string,
+  ctx?: ProviderContext,
+): Promise<ProviderContributorResult> {
+  return runProvider(ctx, (p) => p.contributor(query, ctx));
+}
+
+export async function runHeatmap(
+  ctx?: ProviderContext,
+): Promise<ProviderHeatmapResult> {
+  return runProvider(ctx, (p) => p.heatmap(ctx));
+}
+
+export async function runTrending(
+  ctx?: ProviderContext,
+): Promise<ProviderTrendingResult> {
+  return runProvider(ctx, (p) => p.trending(ctx));
 }
 
 export { mockProvider, officialAdobeProvider, manualImportProvider };
 export type {
   DataProvider,
   DataQuality,
+  ProviderContext,
   ProviderSearchRequest,
   ProviderSearchResult,
   ProviderContributorResult,

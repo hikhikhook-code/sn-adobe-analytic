@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { searchAdobeStock } from "@/lib/scraper/adobe-stock";
+import { runSearch } from "@/lib/providers";
 
 const SearchSchema = z.object({
   keyword: z.string().min(1).max(200),
@@ -32,11 +32,12 @@ export async function POST(req: Request) {
     );
   }
   const data = parsed.data;
-  const result = await searchAdobeStock(data);
-
-  // Best-effort search history logging — never block the response on it.
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
+
+  const result = await runSearch(data, { userId });
+
+  // Best-effort search history logging — never block the response on it.
   if (userId) {
     prisma.searchHistory
       .create({

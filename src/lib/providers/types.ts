@@ -32,6 +32,15 @@ export const DATA_QUALITY_DESCRIPTIONS: Record<DataQuality, string> = {
   verified: "Sourced from a first-party signed feed (Adobe API or a contributor's own export).",
 };
 
+/**
+ * Optional user-scoped context passed by the API layer. Providers that serve
+ * per-user data (e.g. `manualImportProvider`) read this. Providers that don't
+ * care (e.g. `mockProvider`) ignore it.
+ */
+export interface ProviderContext {
+  userId?: string;
+}
+
 export interface ProviderSearchRequest {
   keyword: string;
   sort?: SortMode;
@@ -99,10 +108,42 @@ export interface DataProvider {
   /** Quality tag attached to all data this provider returns. */
   readonly dataQuality: DataQuality;
 
-  search(req: ProviderSearchRequest): Promise<ProviderSearchResult>;
-  contributor(query: string): Promise<ProviderContributorResult>;
-  heatmap(): Promise<ProviderHeatmapResult>;
-  trending(): Promise<ProviderTrendingResult>;
+  search(
+    req: ProviderSearchRequest,
+    ctx?: ProviderContext,
+  ): Promise<ProviderSearchResult>;
+  contributor(
+    query: string,
+    ctx?: ProviderContext,
+  ): Promise<ProviderContributorResult>;
+  heatmap(ctx?: ProviderContext): Promise<ProviderHeatmapResult>;
+  trending(ctx?: ProviderContext): Promise<ProviderTrendingResult>;
+}
+
+/**
+ * Thrown by providers that need a signed-in user (e.g. manualImportProvider)
+ * but were called without one.
+ */
+export class ProviderRequiresUserError extends Error {
+  constructor(providerId: string) {
+    super(
+      `Provider '${providerId}' requires a signed-in user. Falling back to the mock provider.`,
+    );
+    this.name = "ProviderRequiresUserError";
+  }
+}
+
+/**
+ * Thrown by providers that need data the user has not yet supplied (e.g.
+ * manualImportProvider when the user hasn't uploaded any datasets yet).
+ */
+export class ProviderNoDataError extends Error {
+  constructor(providerId: string, detail?: string) {
+    super(
+      `Provider '${providerId}' has no data yet${detail ? ` (${detail})` : ""}. Falling back to the mock provider.`,
+    );
+    this.name = "ProviderNoDataError";
+  }
 }
 
 export class ProviderNotImplementedError extends Error {

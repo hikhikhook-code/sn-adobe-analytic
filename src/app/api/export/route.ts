@@ -25,9 +25,19 @@ const AssetSchema = z.object({
 });
 
 const ExportSchema = z.object({
-  type: z.enum(["search", "portfolio"]).default("search"),
+  type: z.enum(["search", "portfolio", "saved", "imported"]).default("search"),
   query: z.string().default(""),
-  results: z.array(AssetSchema).min(1).max(500),
+  results: z.array(AssetSchema).min(1).max(2000),
+  dataQuality: z
+    .enum(["demo", "estimated", "public_metadata", "verified"])
+    .default("demo"),
+  providerName: z.string().default("Mock data provider"),
+  /**
+   * Opaque payload describing the request that produced this export. Stored
+   * alongside the history row so the user can re-run "download again" later.
+   * Keep small (max 2KB).
+   */
+  params: z.record(z.string(), z.unknown()).default({}),
 });
 
 export async function POST(req: Request) {
@@ -44,7 +54,8 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const { type, query, results } = parsed.data;
+  const { type, query, results, dataQuality, providerName, params } =
+    parsed.data;
   const csv = assetsToCsv(results as SearchAsset[]);
 
   const session = await getServerSession(authOptions);
@@ -52,7 +63,15 @@ export async function POST(req: Request) {
   if (userId) {
     prisma.exportHistory
       .create({
-        data: { userId, type, query, rowCount: results.length },
+        data: {
+          userId,
+          type,
+          query,
+          rowCount: results.length,
+          dataQuality,
+          providerName,
+          paramsJson: JSON.stringify(params).slice(0, 2_048),
+        },
       })
       .catch(() => {});
   }

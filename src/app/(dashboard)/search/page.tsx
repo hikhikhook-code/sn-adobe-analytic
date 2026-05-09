@@ -141,7 +141,14 @@ function SearchPageInner() {
       const res = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "search", query: keyword, results: targets }),
+        body: JSON.stringify({
+          type: "search",
+          query: keyword,
+          results: targets,
+          dataQuality: data.dataQuality,
+          providerName: data.providerName,
+          params: { keyword, sort, contentType, aiFilter },
+        }),
       });
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();
@@ -158,7 +165,7 @@ function SearchPageInner() {
     } finally {
       setExporting(false);
     }
-  }, [data, keyword, selected]);
+  }, [data, keyword, selected, sort, contentType, aiFilter]);
 
   return (
     <>
