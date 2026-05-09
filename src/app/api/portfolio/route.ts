@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { runContributor } from "@/lib/providers";
+import { resolveDatasetScope } from "@/lib/dataset-scope";
 
 const PortfolioSchema = z.object({
   query: z.string().min(1).max(200),
@@ -24,7 +25,20 @@ export async function POST(req: Request) {
   }
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
-  return NextResponse.json(
-    await runContributor(parsed.data.query, { userId }),
-  );
+  // The portfolio page doesn't expose an inline scope picker; it always
+  // respects the user's stored preference. If they're looking at demo
+  // data globally, they see demo contributor data here too — keeps the
+  // cross-app semantics consistent.
+  const scopeInfo = await resolveDatasetScope(userId);
+  const result = await runContributor(parsed.data.query, {
+    userId,
+    datasetScope: scopeInfo.scope,
+  });
+  return NextResponse.json({
+    ...result,
+    datasetScope: scopeInfo.scope,
+    datasetName: scopeInfo.datasetName ?? null,
+    scopeReason: scopeInfo.reason,
+    hasAnyDatasets: scopeInfo.hasAnyDatasets,
+  });
 }

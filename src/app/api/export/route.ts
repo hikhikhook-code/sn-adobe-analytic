@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { assetsToCsv } from "@/lib/csv";
+import { parseDatasetScope } from "@/lib/dataset-scope";
 import type { SearchAsset } from "@/types/search";
 
 const AssetSchema = z.object({
@@ -24,6 +25,13 @@ const AssetSchema = z.object({
   adobeStockUrl: z.string(),
 });
 
+const ScopeSchema = z
+  .object({
+    kind: z.enum(["all", "specific", "demo"]),
+    datasetId: z.string().optional(),
+  })
+  .optional();
+
 const ExportSchema = z.object({
   type: z.enum(["search", "portfolio", "saved", "imported"]).default("search"),
   query: z.string().default(""),
@@ -32,6 +40,14 @@ const ExportSchema = z.object({
     .enum(["demo", "estimated", "public_metadata", "verified"])
     .default("demo"),
   providerName: z.string().default("Mock data provider"),
+  /**
+   * The dataset scope the caller was looking at when they exported. Lets
+   * the history table show "Dataset: Q3 2025" vs "All imported datasets"
+   * vs "Demo data" at a glance — even after the dataset is later archived
+   * or renamed. If omitted, we infer `demo_data` so old clients keep
+   * working.
+   */
+  datasetScope: ScopeSchema,
   /**
    * Opaque payload describing the request that produced this export. Stored
    * alongside the history row so the user can re-run "download again" later.
@@ -54,13 +70,37 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const { type, query, results, dataQuality, providerName, params } =
-    parsed.data;
+  const {
+    type,
+    query,
+    results,
+    dataQuality,
+    providerName,
+    datasetScope: rawScope,
+    params,
+  } = parsed.data;
   const csv = assetsToCsv(results as SearchAsset[]);
 
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
   if (userId) {
+    // Normalize the scope into the string tag we store. Note we don't
+    // re-verify dataset ownership here — the export itself already
+    // passed through runSearch/runContributor/... whose resolveDatasetScope
+    // call enforces ownership. Worst case a rogue body claims
+    // "selected_dataset" for a non-owned id; the history row is
+    // informational-only, not a capability grant.
+    const scope = parseDatasetScope(rawScope);
+    let scopeTag: "all_datasets" | "selected_dataset" | "demo_data";
+    let scopedDatasetId: string | null = null;
+    if (scope?.kind === "specific") {
+      scopeTag = "selected_dataset";
+      scopedDatasetId = scope.datasetId;
+    } else if (scope?.kind === "all") {
+      scopeTag = "all_datasets";
+    } else {
+      scopeTag = "demo_data";
+    }
     prisma.exportHistory
       .create({
         data: {
@@ -70,6 +110,8 @@ export async function POST(req: Request) {
           rowCount: results.length,
           dataQuality,
           providerName,
+          datasetScope: scopeTag,
+          datasetId: scopedDatasetId,
           paramsJson: JSON.stringify(params).slice(0, 2_048),
         },
       })
