@@ -1,0 +1,154 @@
+// SN Adobe Analytic — Prisma schema (SQLite for local dev / MVP)
+// String[] arrays from PRD are stored as JSON-encoded strings here for SQLite
+// compatibility. When migrating to Postgres (Supabase) for production, swap the
+// `provider` to "postgresql" and convert the *Json fields back to String[].
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String    @id @default(cuid())
+  name              String?
+  email             String    @unique
+  emailVerified     DateTime?
+  hashedPassword    String?
+  image             String?
+  plan              String    @default("FREE") // FREE | STARTER | PRO | ANNUAL
+  searchesUsedToday Int       @default(0)
+  searchResetAt     DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  accounts  Account[]
+  sessions  Session[]
+  devices   Device[]
+  searches  SearchHistory[]
+  favorites Favorite[]
+  exports   ExportHistory[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Device {
+  id         String   @id @default(cuid())
+  userId     String
+  deviceName String
+  deviceId   String   @unique
+  lastActive DateTime @default(now())
+  isActive   Boolean  @default(true)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model SearchHistory {
+  id          String   @id @default(cuid())
+  userId      String
+  keyword     String
+  sort        String   @default("relevance")
+  contentType String   @default("all")
+  aiFilter    String   @default("all")
+  resultCount Int?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Favorite {
+  id               String   @id @default(cuid())
+  userId           String
+  assetId          String
+  thumbnailUrl     String
+  title            String
+  downloads        Int
+  performanceScore Int
+  contributorName  String?
+  keywordsJson     String   @default("[]") // JSON-encoded string[]
+  savedAt          DateTime @default(now())
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, assetId])
+}
+
+model CachedAsset {
+  id                String   @id @default(cuid())
+  adobeStockId      String   @unique
+  thumbnailUrl      String
+  title             String
+  downloads         Int
+  performanceScore  Int
+  downloadsPerMonth Float
+  categoriesJson    String   @default("[]") // JSON-encoded
+  contentType       String
+  uploadDate        DateTime
+  contributorName   String
+  contributorId     String
+  isPremium         Boolean  @default(false)
+  isAiGenerated     Boolean  @default(false)
+  keywordsJson      String   @default("[]")
+  lastScrapedAt     DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model CachedSearch {
+  id               String   @id @default(cuid())
+  keyword          String
+  sort             String
+  contentType      String
+  aiFilter         String
+  page             Int      @default(1)
+  totalResults     Int
+  resultIdsJson    String   @default("[]")
+  competitionLevel String?
+  aiSaturation     Float?
+  scrapedAt        DateTime @default(now())
+
+  @@unique([keyword, sort, contentType, aiFilter, page])
+}
+
+model ExportHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String // "search" | "portfolio"
+  query     String
+  rowCount  Int
+  fileUrl   String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
