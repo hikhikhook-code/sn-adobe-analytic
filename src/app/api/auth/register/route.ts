@@ -28,8 +28,13 @@ export async function POST(req: Request) {
     where: { email: email.toLowerCase() },
   });
   if (existing) {
+    // Structured error so the UI can show a friendlier message with a
+    // "Sign in" link instead of just surfacing the raw string.
     return NextResponse.json(
-      { error: "Email already registered" },
+      {
+        error: "That email is already registered. Try signing in instead.",
+        code: "email_taken",
+      },
       { status: 409 },
     );
   }
