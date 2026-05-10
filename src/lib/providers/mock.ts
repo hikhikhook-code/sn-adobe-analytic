@@ -23,7 +23,8 @@ import {
   seasonalStatus,
   sortTrending,
 } from "@/lib/trending";
-import type { SearchAsset } from "@/types/search";
+import { extractQueryTokens } from "@/lib/similarity";
+import type { SearchAsset, SimilarAsset } from "@/types/search";
 import type {
   DataProvider,
   HeatmapFilters,
@@ -33,6 +34,8 @@ import type {
   ProviderHeatmapResult,
   ProviderSearchRequest,
   ProviderSearchResult,
+  ProviderSimilarRequest,
+  ProviderSimilarResult,
   ProviderTrendingResult,
   RisingNiche,
   SeasonalTrend,
@@ -49,9 +52,10 @@ const CAPABILITIES: ProviderCapabilities = {
   contributor: "supported",
   heatmap: "supported",
   trending: "supported",
-  // Similar Image Search has no demo data path; we mark it unsupported so
-  // the UI shows "Coming Soon" rather than fake similar-images.
-  similarImage: "unsupported",
+  // Similar Image Search returns demo "visually similar" results, ranked
+  // by metadata overlap with the query (URL/filename/hint). Tagged
+  // `Demo Data` so users never mistake the ranking for true visual AI.
+  similarImage: "supported",
   // Mock numbers ARE provided, but they're synthetic — `dataQuality: "demo"`
   // already communicates this. We still return `metricsAvailable: true` so
   // the UI renders the figures; the demo badge is what tells the user not
@@ -471,5 +475,73 @@ export const mockProvider: DataProvider = {
       providerId: PROVIDER_ID,
       capabilities: CAPABILITIES,
     } satisfies ProviderTrendingResult;
+  },
+
+  async similar(req: ProviderSimilarRequest) {
+    // Demo similar-image results: seed off the strongest token we can
+    // derive from the query (URL/filename/hint) and reuse the keyword
+    // search generator so cards look familiar. Falls back to a generic
+    // "similar images" stub when we have no textual signal at all.
+    //
+    // Similarity scores are synthesized in a descending ramp — honest as
+    // long as the response is tagged `Demo Data`. The mock provider
+    // never claims real visual matching.
+    const tokens = req.queryTokens.length
+      ? req.queryTokens
+      : extractQueryTokens({
+          imageUrl: req.imageUrl,
+          imageFileName: req.imageFileName,
+          hint: req.hint,
+        });
+    const seedKeyword = tokens[0] ?? "similar images";
+    const page = req.page ?? 1;
+    const { results } = generateMockSearchResults(
+      seedKeyword,
+      page,
+      RESULTS_PER_PAGE,
+    );
+    let filtered = results;
+    if (req.contentType && req.contentType !== "all") {
+      filtered = filtered.filter((r) => r.contentType === req.contentType);
+    }
+    if (req.aiFilter === "ai_only") {
+      filtered = filtered.filter((r) => r.isAiGenerated);
+    } else if (req.aiFilter === "exclude_ai") {
+      filtered = filtered.filter((r) => !r.isAiGenerated);
+    }
+
+    // Descending ramp: top result ≈ 95, last ≈ 55. Keeps the demo
+    // honest — no row is ever "100% match" without a real URL hit.
+    const ranked: SimilarAsset[] = filtered.map((asset, idx) => {
+      const exactUrlMatch =
+        !!req.imageUrl &&
+        (asset.adobeStockUrl === req.imageUrl ||
+          asset.thumbnailUrl === req.imageUrl);
+      const score = exactUrlMatch
+        ? 100
+        : Math.max(
+            55,
+            95 - Math.round((idx / Math.max(1, filtered.length - 1)) * 40),
+          );
+      return {
+        ...asset,
+        metricsAvailable: true,
+        similarityScore: score,
+        similarityAvailable: true,
+      };
+    });
+
+    return {
+      totalResults: ranked.length,
+      results: ranked,
+      queryTokens: tokens,
+      dataQuality: "demo",
+      providerName: PROVIDER_NAME,
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
+      notice: tokens.length
+        ? "Demo similar-image results ranked by metadata overlap. Not real visual AI matching."
+        : "Demo similar-image results. Provide an image URL or filename to refine the ranking.",
+    } satisfies ProviderSimilarResult;
   },
 };

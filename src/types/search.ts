@@ -71,3 +71,54 @@ export interface SearchRequest {
   aiFilter?: AiFilter;
   page?: number;
 }
+
+/**
+ * A search result paired with a metadata-similarity score.
+ *
+ * `similarityScore` is 0..100. The PRD calls for source-aware labeling:
+ * mock provider tags the response `Demo Data`, manual provider tags it
+ * `Estimated` (we ranked imported assets by metadata overlap, not pixels),
+ * and the official provider returns no rows.
+ *
+ * `similarityAvailable` is `false` only when we genuinely could not
+ * compute a score (e.g. the request had no URL/filename/hint and we
+ * never saw a URL match). The UI must render `Unavailable` rather than
+ * fake a zero.
+ */
+export interface SimilarAsset extends SearchAsset {
+  similarityScore: number;
+  similarityAvailable?: boolean;
+}
+
+export interface SimilarSearchRequest {
+  /** Public URL of the image the user is looking up. */
+  imageUrl?: string;
+  /** Original filename when the user uploaded a file (we tokenize it). */
+  imageFileName?: string;
+  /** Optional free-text hint describing the image. */
+  hint?: string;
+  contentType?: ContentType;
+  aiFilter?: AiFilter;
+  page?: number;
+}
+
+export interface SimilarSearchResponse {
+  totalResults: number;
+  results: SimilarAsset[];
+  page: number;
+  pageSize: number;
+  dataQuality: DataQuality;
+  providerName: string;
+  providerId?: string;
+  /** Provider-aware notice (e.g. "Similar Image Search is unsupported by this provider."). */
+  notice?: string;
+  /** Tokens we mined from the request — surfaced in the UI so users see
+   *  exactly what we matched against. */
+  queryTokens: string[];
+  /** Echo of the resolved input so the UI can label its preview. */
+  query: {
+    imageUrl?: string;
+    imageFileName?: string;
+    hint?: string;
+  };
+}

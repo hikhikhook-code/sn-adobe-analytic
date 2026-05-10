@@ -17,6 +17,8 @@ import type {
   ProviderResultEnvelope,
   ProviderSearchRequest,
   ProviderSearchResult,
+  ProviderSimilarRequest,
+  ProviderSimilarResult,
   ProviderTrendingResult,
   TrendingFilters,
 } from "./types";
@@ -209,6 +211,13 @@ export async function runTrending(
   return runProvider(ctx, (p) => p.trending(ctx, filters));
 }
 
+export async function runSimilar(
+  req: ProviderSimilarRequest,
+  ctx?: ProviderContext,
+): Promise<ProviderSimilarResult> {
+  return runProvider(ctx, (p) => p.similar(req, ctx));
+}
+
 export { mockProvider, officialAdobeProvider, manualImportProvider };
 export type {
   DataProvider,
@@ -225,6 +234,8 @@ export type {
   ProviderSearchResult,
   ProviderContributorResult,
   ProviderHeatmapResult,
+  ProviderSimilarRequest,
+  ProviderSimilarResult,
   ProviderTrendingResult,
   RisingNiche,
   SeasonalTrend,

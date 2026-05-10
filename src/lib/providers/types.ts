@@ -2,6 +2,7 @@ import type {
   AiFilter,
   ContentType,
   SearchAsset,
+  SimilarAsset,
   SortMode,
 } from "@/types/search";
 import type { DatasetScope } from "@/lib/dataset-scope";
@@ -313,6 +314,34 @@ export interface ProviderTrendingResult extends ProviderResultEnvelope {
   appliedFilters: TrendingFilters;
 }
 
+/**
+ * PRD §5 Similar Image Search request. The PRD scope intentionally rules
+ * out real visual AI / pixel hashing for this PR — providers receive only
+ * the textual signal we can derive from the upload (URL, filename, hint).
+ * The image bytes themselves never reach the provider, so we cannot
+ * accidentally claim a real visual match.
+ */
+export interface ProviderSimilarRequest {
+  imageUrl?: string;
+  imageFileName?: string;
+  hint?: string;
+  contentType?: ContentType;
+  aiFilter?: AiFilter;
+  page?: number;
+  /** Pre-tokenized query bag computed by the route handler so providers
+   *  don't redo the same regex work. Empty array → no textual signal. */
+  queryTokens: string[];
+}
+
+export interface ProviderSimilarResult extends ProviderResultEnvelope {
+  totalResults: number;
+  results: SimilarAsset[];
+  /** Echo of the tokens the provider actually scored against. May be
+   *  empty when the provider couldn't derive any (e.g. official with no
+   *  configured source). */
+  queryTokens: string[];
+}
+
 export interface DataProvider {
   /** Stable provider key (used in env var DATA_PROVIDER). */
   readonly id: string;
@@ -339,6 +368,10 @@ export interface DataProvider {
     ctx?: ProviderContext,
     filters?: TrendingFilters,
   ): Promise<ProviderTrendingResult>;
+  similar(
+    req: ProviderSimilarRequest,
+    ctx?: ProviderContext,
+  ): Promise<ProviderSimilarResult>;
 }
 
 /**

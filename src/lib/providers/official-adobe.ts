@@ -13,6 +13,8 @@ import type {
   ProviderContributorResult,
   ProviderSearchRequest,
   ProviderSearchResult,
+  ProviderSimilarRequest,
+  ProviderSimilarResult,
 } from "./types";
 
 /**
@@ -398,6 +400,32 @@ export const officialAdobeProvider: DataProvider = {
 
   async trending() {
     throw new ProviderFeatureUnsupportedError(PROVIDER_ID, "trending");
+  },
+
+  async similar(req: ProviderSimilarRequest) {
+    // Public-metadata sources do not expose a verified "similar image"
+    // endpoint, and we will not fake one. Per the PRD: "If official/public
+    // provider does not support similar image search yet, return
+    // Unsupported/Unavailable with a clear notice. Do not fake official
+    // visual search."
+    //
+    // We deliberately RETURN an honestly-labeled empty response (rather
+    // than throw `ProviderFeatureUnsupportedError`) so the UI can show the
+    // "unsupported" state when the user explicitly chose `DATA_PROVIDER=official`,
+    // instead of silently substituting demo results. The mock and manual
+    // providers serve users who haven't pinned `official`.
+    return {
+      totalResults: 0,
+      results: [],
+      queryTokens: req.queryTokens,
+      dataQuality: "public_metadata",
+      providerId: PROVIDER_ID,
+      providerName: PROVIDER_NAME,
+      capabilities: CAPABILITIES,
+      notice:
+        "Similar Image Search is not available from this public-metadata source. " +
+        "No internal Adobe APIs or scrapers are used \u2014 switch to the demo or imported-data provider for similarity ranking.",
+    } satisfies ProviderSimilarResult;
   },
 };
 

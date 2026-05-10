@@ -10,6 +10,10 @@ import { ResultsToolbar } from "@/components/search/results-toolbar";
 import { ResultCard } from "@/components/search/result-card";
 import { Pagination } from "@/components/search/pagination";
 import { RecentSearches } from "@/components/search/recent-searches";
+import {
+  SimilarImageSearch,
+  type SimilarImageQuery,
+} from "@/components/search/similar-image-search";
 import { useRecentSearches } from "@/hooks/use-recent-searches";
 import { useFavorites } from "@/hooks/use-favorites";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -21,6 +25,8 @@ import type {
   ContentType,
   SearchAsset,
   SearchResponse,
+  SimilarAsset,
+  SimilarSearchResponse,
   SortMode,
 } from "@/types/search";
 import type { ProviderCapabilities } from "@/lib/providers/types";
@@ -35,6 +41,14 @@ interface SearchResponseWithScope extends SearchResponse {
   hasAnyDatasets?: boolean;
   capabilities?: ProviderCapabilities;
   notice?: string;
+}
+
+interface SimilarResponseWithScope extends SimilarSearchResponse {
+  datasetScope?: DatasetScope;
+  datasetName?: string | null;
+  scopeReason?: DatasetScopeInfo["reason"];
+  hasAnyDatasets?: boolean;
+  capabilities?: ProviderCapabilities;
 }
 
 function SearchPageInner() {
@@ -53,6 +67,21 @@ function SearchPageInner() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toolbarSort, setToolbarSort] = useState<"default" | "downloads" | "performance">("default");
   const [exporting, setExporting] = useState(false);
+
+  // Similar Image Search panel state — separate from keyword search so
+  // the user can flip between the two flows without losing either's data.
+  const [byImageOpen, setByImageOpen] = useState(false);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [similarError, setSimilarError] = useState<string | null>(null);
+  const [similarData, setSimilarData] =
+    useState<SimilarResponseWithScope | null>(null);
+  const [similarSeedUrl, setSimilarSeedUrl] = useState<string | undefined>(
+    undefined,
+  );
+  const [similarSelected, setSimilarSelected] = useState<Set<string>>(
+    new Set(),
+  );
+  const [similarExporting, setSimilarExporting] = useState(false);
 
   // Mirror the global selector so the empty-state banner can describe the
   // user's scope even before they run a search.
@@ -202,6 +231,145 @@ function SearchPageInner() {
     }
   }, [data, keyword, selected, sort, contentType, aiFilter]);
 
+  const runSimilar = useCallback(
+    async (q: SimilarImageQuery) => {
+      setSimilarLoading(true);
+      setSimilarError(null);
+      try {
+        const res = await fetch("/api/search/similar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...q,
+            contentType,
+            aiFilter,
+            datasetScope: active.scope,
+          }),
+        });
+        const json = (await res.json()) as
+          | SimilarResponseWithScope
+          | { error: string; issues?: unknown };
+        if (!res.ok) {
+          const msg =
+            "error" in json && typeof json.error === "string"
+              ? json.error
+              : `Similar search failed (${res.status})`;
+          throw new Error(msg);
+        }
+        setSimilarData(json as SimilarResponseWithScope);
+        setSimilarSelected(new Set());
+      } catch (e) {
+        setSimilarError(e instanceof Error ? e.message : "Unknown error");
+      } finally {
+        setSimilarLoading(false);
+      }
+    },
+    [contentType, aiFilter, active.scope],
+  );
+
+  const clearSimilar = useCallback(() => {
+    setSimilarData(null);
+    setSimilarError(null);
+    setSimilarSelected(new Set());
+    setSimilarSeedUrl(undefined);
+  }, []);
+
+  const toggleSimilarSelected = useCallback((id: string) => {
+    setSimilarSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAllSimilar = useCallback(() => {
+    if (!similarData) return;
+    if (similarSelected.size === similarData.results.length) {
+      setSimilarSelected(new Set());
+    } else {
+      setSimilarSelected(new Set(similarData.results.map((r) => r.id)));
+    }
+  }, [similarData, similarSelected.size]);
+
+  const handleSimilarExport = useCallback(async () => {
+    if (!similarData) return;
+    const targets: SimilarAsset[] =
+      similarSelected.size > 0
+        ? similarData.results.filter((r) => similarSelected.has(r.id))
+        : similarData.results;
+    if (targets.length === 0) return;
+    setSimilarExporting(true);
+    try {
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "similar",
+          query:
+            similarData.query.imageUrl ??
+            similarData.query.imageFileName ??
+            similarData.query.hint ??
+            "similar",
+          results: targets,
+          dataQuality: similarData.dataQuality,
+          providerName: similarData.providerName,
+          datasetScope: similarData.datasetScope,
+          params: {
+            imageUrl: similarData.query.imageUrl,
+            imageFileName: similarData.query.imageFileName,
+            hint: similarData.query.hint,
+            queryTokens: similarData.queryTokens,
+            contentType,
+            aiFilter,
+          },
+        }),
+      });
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const safeName = (
+        similarData.query.imageFileName ??
+        similarData.query.imageUrl ??
+        "similar"
+      )
+        .replace(/[^a-z0-9]+/gi, "-")
+        .slice(0, 60) || "similar";
+      a.download = `sn-similar-${safeName}-${
+        new Date().toISOString().slice(0, 10)
+      }.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setSimilarExporting(false);
+    }
+  }, [similarData, similarSelected, contentType, aiFilter]);
+
+  const handleFindSimilarFromCard = useCallback(
+    (asset: SearchAsset) => {
+      setByImageOpen(true);
+      const url =
+        (asset.adobeStockUrl && asset.adobeStockUrl.startsWith("http")
+          ? asset.adobeStockUrl
+          : asset.thumbnailUrl) ?? "";
+      setSimilarSeedUrl(url);
+      void runSimilar({ imageUrl: url, hint: asset.title });
+      // Surface the panel for the user.
+      if (typeof window !== "undefined") {
+        requestAnimationFrame(() => {
+          document
+            .getElementById("similar-image-search-panel")
+            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
+    },
+    [runSimilar],
+  );
+
   return (
     <>
       <TopBar
@@ -214,6 +382,8 @@ function SearchPageInner() {
             defaultValue={keyword}
             loading={loading}
             onSubmit={handleSubmit}
+            onToggleByImage={() => setByImageOpen((v) => !v)}
+            byImageActive={byImageOpen}
           />
           <SearchFilters
             sort={sort}
@@ -228,6 +398,111 @@ function SearchPageInner() {
             onClear={clearRecents}
           />
         </div>
+
+        {byImageOpen && (
+          <div id="similar-image-search-panel" className="space-y-4">
+            <SimilarImageSearch
+              seedImageUrl={similarSeedUrl}
+              loading={similarLoading}
+              hasResults={Boolean(similarData)}
+              onFindSimilar={runSimilar}
+              onClear={clearSimilar}
+            />
+
+            {similarError && (
+              <div
+                role="alert"
+                className="rounded-md bg-rose-50 px-4 py-3 text-sm text-rose-700"
+              >
+                {similarError}
+              </div>
+            )}
+
+            {similarLoading && !similarData && (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <Skeleton key={i} className="h-[480px] w-full" />
+                ))}
+              </div>
+            )}
+
+            {similarData && (
+              <>
+                <DataSourceBanner
+                  scope={similarData.datasetScope ?? active.scope}
+                  datasetName={similarData.datasetName ?? active.datasetName}
+                  hasAnyDatasets={
+                    similarData.hasAnyDatasets ?? active.hasAnyDatasets
+                  }
+                  reason={similarData.scopeReason ?? active.reason}
+                  dataQuality={similarData.dataQuality}
+                  providerName={similarData.providerName}
+                />
+
+                {similarData.notice ? (
+                  <div
+                    role="status"
+                    className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs text-violet-900"
+                  >
+                    <p className="font-semibold uppercase tracking-wide">
+                      Heads up · {similarData.providerName}
+                    </p>
+                    <p className="mt-0.5 text-[12px] leading-snug">
+                      {similarData.notice}
+                    </p>
+                    {similarData.queryTokens.length > 0 && (
+                      <p className="mt-1 text-[11px] text-violet-800/80">
+                        Matching against tokens:{" "}
+                        <span className="font-mono">
+                          {similarData.queryTokens.slice(0, 12).join(", ")}
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+
+                <ResultsToolbar
+                  total={similarData.results.length}
+                  selectedCount={similarSelected.size}
+                  toolbarSort="default"
+                  onSortChange={() => {}}
+                  onSelectAll={selectAllSimilar}
+                  onExport={handleSimilarExport}
+                  exporting={similarExporting}
+                />
+
+                {similarData.results.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-border bg-card p-10 text-center">
+                    <p className="text-sm font-medium">
+                      No similar results found
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {similarData.providerId === "official"
+                        ? "This provider does not support similar-image search. Switch to demo or imported data, or pick a different image."
+                        : "Try a different image, paste a URL with descriptive path segments, or add a hint."}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {similarData.results.map((asset) => (
+                      <ResultCard
+                        key={asset.id}
+                        asset={asset}
+                        isFavorited={isFavorited(asset.id)}
+                        onToggleFavorite={toggleFavorite}
+                        selected={similarSelected.has(asset.id)}
+                        onToggleSelected={toggleSimilarSelected}
+                        dataQuality={similarData.dataQuality}
+                        similarityScore={asset.similarityScore}
+                        similarityAvailable={asset.similarityAvailable}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="rounded-md bg-rose-50 px-4 py-3 text-sm text-rose-700">
@@ -307,6 +582,7 @@ function SearchPageInner() {
                     selected={selected.has(asset.id)}
                     onToggleSelected={toggleSelected}
                     dataQuality={data.dataQuality}
+                    onFindSimilar={handleFindSimilarFromCard}
                   />
                 ))}
               </div>

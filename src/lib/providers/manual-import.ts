@@ -21,7 +21,8 @@ import {
   sortTrending,
   trendingPeriodMs,
 } from "@/lib/trending";
-import type { SearchAsset } from "@/types/search";
+import { extractQueryTokens, rankSimilar } from "@/lib/similarity";
+import type { SearchAsset, SimilarAsset } from "@/types/search";
 import type { DatasetScope } from "@/lib/dataset-scope";
 import {
   ProviderNoDataError,
@@ -36,6 +37,8 @@ import type {
   ProviderHeatmapResult,
   ProviderSearchRequest,
   ProviderSearchResult,
+  ProviderSimilarRequest,
+  ProviderSimilarResult,
   ProviderTrendingResult,
   RisingNiche,
   SeasonalTrend,
@@ -52,10 +55,10 @@ const CAPABILITIES: ProviderCapabilities = {
   contributor: "supported",
   heatmap: "supported",
   trending: "supported",
-  // Manual provider has no per-asset reverse-image index (the user just
-  // uploaded a CSV). UI surfaces "Coming Soon" until a future PR wires up
-  // perceptual hashing or a remote similar-image API.
-  similarImage: "unsupported",
+  // Metadata-similarity proxy: rank imported assets by token overlap with
+  // the query (URL/filename/hint). The envelope tags the response
+  // `Estimated` so users never confuse this with true visual AI matching.
+  similarImage: "supported",
   // The user uploaded these numbers themselves — we trust them as
   // verified-from-import. The UI still shows the data-quality badge so
   // the source is always visible.
@@ -822,6 +825,86 @@ export const manualImportProvider: DataProvider = {
       capabilities: CAPABILITIES,
       providerName: PROVIDER_NAME,
     } satisfies ProviderTrendingResult;
+  },
+
+  async similar(req: ProviderSimilarRequest, ctx) {
+    if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
+    const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
+    if (rows.length === 0) {
+      throw new ProviderNoDataError(
+        PROVIDER_ID,
+        "no datasets imported — import a CSV to enable similar-image ranking",
+      );
+    }
+
+    const tokens = req.queryTokens.length
+      ? req.queryTokens
+      : extractQueryTokens({
+          imageUrl: req.imageUrl,
+          imageFileName: req.imageFileName,
+          hint: req.hint,
+        });
+
+    let candidates = rows.map(toSearchAsset);
+    if (req.contentType && req.contentType !== "all") {
+      candidates = candidates.filter((a) => a.contentType === req.contentType);
+    }
+    if (req.aiFilter === "ai_only") {
+      candidates = candidates.filter((a) => a.isAiGenerated);
+    } else if (req.aiFilter === "exclude_ai") {
+      candidates = candidates.filter((a) => !a.isAiGenerated);
+    }
+
+    // Rank candidates by metadata-similarity proxy. With zero query
+    // tokens AND no URL hit there is no honest way to rank — we still
+    // return the candidate set so the UI can show "no matches" rather
+    // than crash, but every row is flagged `similarityAvailable: false`.
+    const ranked = rankSimilar(candidates, {
+      queryTokens: tokens,
+      imageUrl: req.imageUrl,
+      contentType: req.contentType,
+    });
+
+    // Drop rows with score 0 once we have any ranked hits — they're
+    // noise. If every row scored 0 (e.g. no tokens), keep the top page
+    // anyway so the UI can render an "Unavailable" state per card.
+    const hasAnyHit = ranked.some(
+      (r) => r.score.available && r.score.score > 0,
+    );
+    const filtered = hasAnyHit
+      ? ranked.filter((r) => r.score.available && r.score.score > 0)
+      : ranked;
+
+    const page = req.page ?? 1;
+    const start = (page - 1) * RESULTS_PER_PAGE;
+    const paged = filtered.slice(start, start + RESULTS_PER_PAGE);
+    const results: SimilarAsset[] = paged.map(({ asset, score }) => ({
+      ...asset,
+      similarityScore: score.available ? score.score : 0,
+      similarityAvailable: score.available,
+    }));
+
+    const notice = hasAnyHit
+      ? "Ranked by metadata similarity (title, keywords, categories, content type) over your imported assets. Not real visual AI matching."
+      : tokens.length
+        ? "No metadata overlap between the query and your imported assets. Try a different image, URL, or hint."
+        : "Provide an image URL, filename, or hint so we can score similarity against your imported assets.";
+
+    return {
+      totalResults: filtered.length,
+      results,
+      queryTokens: tokens,
+      // Even though the underlying assets are `verified` from the user's
+      // own import, the *ranking itself* is estimated from metadata. We
+      // tag the envelope `estimated` so the UI's similarity badge is
+      // honest. Per-asset `metricsAvailable` continues to honor the
+      // import's verified download numbers.
+      dataQuality: "estimated",
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
+      providerName: PROVIDER_NAME,
+      notice,
+    } satisfies ProviderSimilarResult;
   },
 };
 
