@@ -143,30 +143,47 @@ export async function GET() {
         performanceScore: true,
         savedAt: true,
         keywordsJson: true,
+        // Track-changes snapshot. When present, the dashboard preview
+        // badge reflects the tier of the most recent refresh instead of
+        // the active provider's default — a manual-imported saved row
+        // remains `Verified` even if the user flipped to mock since.
+        lastCheckedDataQuality: true,
+        lastCheckedProviderId: true,
       },
     }),
     runDashboard(ctx),
   ]);
 
   // Saved-asset preview is "what the user saved", not "what the active
-  // provider says". To stay honest, we tag each saved row with the
-  // active provider's data-quality so the UI shows a single consistent
-  // badge per row. (We don't persist a per-favorite quality snapshot
-  // yet — that's a follow-up if/when saved-asset audit becomes a PRD
-  // requirement.)
-  const savedAssetsPreview = savedAssetsPreviewRows.map((f) => ({
-    id: f.id,
-    assetId: f.assetId,
-    thumbnailUrl: f.thumbnailUrl,
-    title: f.title,
-    contributorName: f.contributorName,
-    downloads: f.downloads,
-    performanceScore: f.performanceScore,
-    keywords: parseJsonArray<string>(f.keywordsJson),
-    savedAt: f.savedAt,
-    dataQuality: analytics.dataQuality,
-    providerName: analytics.providerName,
-  }));
+  // provider says". To stay honest, we prefer each favorite's most
+  // recent tracked data-quality (populated by `/api/saved/track`).
+  // Falling back to the active provider's quality keeps the UI
+  // consistent for rows that haven't been refreshed yet; that fallback
+  // never upgrades the row — a demo-era save stays tagged `Demo Data`
+  // when the current provider is also demo, and only moves up once the
+  // user explicitly refreshes with a matching imported row.
+  const savedAssetsPreview = savedAssetsPreviewRows.map((f) => {
+    const dq =
+      (f.lastCheckedDataQuality as typeof analytics.dataQuality | null) ??
+      analytics.dataQuality;
+    const providerName =
+      f.lastCheckedProviderId === "manual"
+        ? "User imported data"
+        : analytics.providerName;
+    return {
+      id: f.id,
+      assetId: f.assetId,
+      thumbnailUrl: f.thumbnailUrl,
+      title: f.title,
+      contributorName: f.contributorName,
+      downloads: f.downloads,
+      performanceScore: f.performanceScore,
+      keywords: parseJsonArray<string>(f.keywordsJson),
+      savedAt: f.savedAt,
+      dataQuality: dq,
+      providerName,
+    };
+  });
 
   return NextResponse.json({
     signedIn: true,

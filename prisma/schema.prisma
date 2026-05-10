@@ -53,6 +53,8 @@ model User {
   favorites Favorite[]
   exports   ExportHistory[]
   importedDatasets ImportedDataset[]
+  collections      Collection[]
+  savedSearches    SavedSearch[]
 }
 
 model Account {
@@ -117,14 +119,107 @@ model Favorite {
   assetId          String
   thumbnailUrl     String
   title            String
+  // `downloads` / `performanceScore` are the SAVED-AT SNAPSHOT. They never
+  // change after the initial save — they're the baseline the UI diffs
+  // against when computing `deltaDownloads` / `deltaPerformanceScore`.
+  // Rename happened implicitly at PR #15 — schema kept for compatibility
+  // with rows persisted in PR #1..#14.
   downloads        Int
   performanceScore Int
   contributorName  String?
   keywordsJson     String   @default("[]") // JSON-encoded string[]
   savedAt          DateTime @default(now())
+  // Free-text user notes. Optional; capped at ~2KB by the API layer.
+  notes            String?
+  // Collection/folder assignment. Nullable (= "Uncategorized"). Not a
+  // cascading FK at the DB level because SQLite's onDelete defaults
+  // already do what we want here: if a Collection is deleted we want the
+  // favorites to fall back to Uncategorized, not to be deleted. Enforced
+  // via `SetNull` below.
+  collectionId     String?
+  collection       Collection? @relation(fields: [collectionId], references: [id], onDelete: SetNull)
+  // Track-changes telemetry. The UI uses these to render the delta card.
+  // `lastCheckedAt == null` means "tracking has not been attempted yet"
+  // and we render "Not yet checked" instead of a fabricated +0 delta.
+  // `lastCheckedDownloads == null` after a refresh means the active
+  // provider couldn't supply a verified current figure — we render
+  // "Unavailable" on the delta card rather than faking a zero.
+  lastCheckedAt             DateTime?
+  lastCheckedDownloads      Int?
+  lastCheckedPerformanceScore Int?
+  // Data-quality tier of the most recent refresh (demo | estimated |
+  // public_metadata | verified). Stored as a string because Prisma
+  // doesn't support enums on SQLite cleanly.
+  lastCheckedDataQuality    String?
+  lastCheckedProviderId     String?
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, assetId])
+  @@index([userId, collectionId])
+}
+
+/**
+ * User-defined folder for organizing saved assets and saved searches.
+ * Users can create as many as they want. Deleting a collection moves its
+ * contained items back to "Uncategorized" (SetNull) rather than cascading
+ * — we never want a misclick to wipe the user's saved library.
+ */
+model Collection {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  // Optional short description shown under the collection name.
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  favorites   Favorite[]
+  searches    SavedSearch[]
+
+  // Case-sensitive uniqueness per-user. The API layer lowercases the
+  // display name before comparing to keep "Travel" and "travel" from
+  // colliding in practice while preserving the user's casing for display.
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+/**
+ * User-saved search query + filter set. Separate from SearchHistory —
+ * history is transient, SavedSearch is pinned by the user. Carries the
+ * resolved provider + data-quality at save time so the UI can label the
+ * row honestly even if the user later switches providers.
+ *
+ * Dataset scope is snapshotted as a string tag (same shape as
+ * ExportHistory) so a later archive/rename of the underlying dataset
+ * doesn't break the saved row.
+ */
+model SavedSearch {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String?  // User-editable display label; defaults to the keyword
+  keyword      String
+  sort         String   @default("relevance")
+  contentType  String   @default("all")
+  aiFilter     String   @default("all")
+  resultCount  Int?
+  // Quality + provider snapshot at save time. Matches ExportHistory's
+  // shape so the UI can reuse the same badges.
+  dataQuality  String   @default("demo")
+  providerName String   @default("Mock data provider")
+  providerId   String?
+  // Dataset scope at save time. See ExportHistory.datasetScope for why
+  // we keep this as a string tag + nullable non-FK dataset id.
+  datasetScope String   @default("demo_data")
+  datasetId    String?
+  collectionId String?
+  collection   Collection? @relation(fields: [collectionId], references: [id], onDelete: SetNull)
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, collectionId])
 }
 
 model CachedAsset {
