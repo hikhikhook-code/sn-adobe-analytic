@@ -26,11 +26,13 @@ import {
 import { extractQueryTokens } from "@/lib/similarity";
 import type { SearchAsset, SimilarAsset } from "@/types/search";
 import type {
+  DashboardKeywordHighlight,
   DataProvider,
   HeatmapFilters,
   HeatmapTile,
   ProviderCapabilities,
   ProviderContributorResult,
+  ProviderDashboardResult,
   ProviderHeatmapResult,
   ProviderSearchRequest,
   ProviderSearchResult,
@@ -56,6 +58,10 @@ const CAPABILITIES: ProviderCapabilities = {
   // by metadata overlap with the query (URL/filename/hint). Tagged
   // `Demo Data` so users never mistake the ranking for true visual AI.
   similarImage: "supported",
+  // Dashboard rollup synthesized from a sample of demo assets +
+  // TRENDING_KEYWORDS. Tagged `Demo Data` so users never confuse it
+  // with real portfolio analytics.
+  dashboard: "supported",
   // Mock numbers ARE provided, but they're synthetic — `dataQuality: "demo"`
   // already communicates this. We still return `metricsAvailable: true` so
   // the UI renders the figures; the demo badge is what tells the user not
@@ -543,5 +549,111 @@ export const mockProvider: DataProvider = {
         ? "Demo similar-image results ranked by metadata overlap. Not real visual AI matching."
         : "Demo similar-image results. Provide an image URL or filename to refine the ranking.",
     } satisfies ProviderSimilarResult;
+  },
+
+  async dashboard() {
+    // Synthesize a demo "portfolio" by drawing assets from a handful of
+    // trending keywords. The mock generator is seeded so the rollup is
+    // stable across calls. Every figure is tagged `Demo Data`; the demo
+    // badge — not the magnitude — is what tells users not to trust
+    // these as real Adobe Stock numbers.
+    const seedKeywords = TRENDING_KEYWORDS.slice(0, 4).map((t) => t.keyword);
+    const seen = new Set<string>();
+    const pool: SearchAsset[] = [];
+    for (const kw of seedKeywords) {
+      const { results } = generateMockSearchResults(kw, 1, 12);
+      for (const r of results) {
+        if (!seen.has(r.id)) {
+          seen.add(r.id);
+          pool.push({ ...r, metricsAvailable: true });
+        }
+      }
+    }
+
+    const importedAssets = pool.length;
+    const totalDownloads = pool.reduce((s, a) => s + a.downloads, 0);
+    const averagePerformanceScore =
+      pool.length > 0
+        ? Math.round(
+            pool.reduce((s, a) => s + a.performanceScore, 0) / pool.length,
+          )
+        : 0;
+
+    const breakdownMap = new Map<string, number>();
+    for (const a of pool) {
+      breakdownMap.set(
+        a.contentType,
+        (breakdownMap.get(a.contentType) ?? 0) + 1,
+      );
+    }
+    const contentBreakdown = Array.from(breakdownMap.entries())
+      .map(([type, count]) => ({
+        type,
+        count,
+        pct: pool.length ? Math.round((count / pool.length) * 100) : 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const topPerformers: TopPerformer[] = [...pool]
+      .sort((a, b) => b.downloads - a.downloads || b.performanceScore - a.performanceScore)
+      .slice(0, 8)
+      .map((a) => ({ asset: a, recentDownloads: a.downloads }));
+
+    const kwAccum = new Map<
+      string,
+      { keyword: string; assets: number; downloads: number }
+    >();
+    for (const a of pool) {
+      for (const k of a.keywords) {
+        const key = k.toLowerCase().trim();
+        if (!key) continue;
+        const cur = kwAccum.get(key) ?? {
+          keyword: key,
+          assets: 0,
+          downloads: 0,
+        };
+        cur.assets += 1;
+        cur.downloads += a.downloads;
+        kwAccum.set(key, cur);
+      }
+    }
+    const keywordHighlights: DashboardKeywordHighlight[] = Array.from(
+      kwAccum.values(),
+    )
+      .map((v) => ({ ...v, metricsAvailable: true }))
+      .sort(
+        (a, b) => b.downloads - a.downloads || b.assets - a.assets,
+      )
+      .slice(0, 8);
+
+    const trendingKeywords: TrendingKeyword[] = TRENDING_KEYWORDS.slice(0, 8).map(
+      (t) => ({
+        keyword: t.keyword,
+        volume: t.volume,
+        growth: t.growth,
+        metricsAvailable: true,
+      }),
+    );
+
+    return {
+      importedAssets,
+      importedAssetsAvailable: true,
+      totalDownloads,
+      totalDownloadsAvailable: true,
+      averagePerformanceScore,
+      averagePerformanceScoreAvailable: true,
+      contentBreakdown,
+      contentBreakdownAvailable: true,
+      topPerformers,
+      topPerformersAvailable: true,
+      keywordHighlights,
+      keywordHighlightsAvailable: true,
+      trendingKeywords,
+      trendingKeywordsAvailable: true,
+      dataQuality: "demo",
+      providerName: PROVIDER_NAME,
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
+    } satisfies ProviderDashboardResult;
   },
 };

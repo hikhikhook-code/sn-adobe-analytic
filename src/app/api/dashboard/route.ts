@@ -3,25 +3,50 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { resolveDatasetScope, scopedDatasetIds } from "@/lib/dataset-scope";
+import { runDashboard } from "@/lib/providers";
+import { parseJsonArray } from "@/lib/utils";
 
 /**
- * GET /api/dashboard — top-of-page activity counters + recent searches.
+ * GET /api/dashboard — provider-aware dashboard analytics + account-wide
+ * activity counters.
  *
- * The imported-asset counter respects the user's dataset scope, so the
- * dashboard number matches what they'll see in Search / Portfolio / etc.
- * Everything else (saved, exports, tracked contributors) is account-wide
- * regardless of scope — that matches the heuristic "my activity across
- * the whole app", not "my activity against this dataset".
+ * The response is split into three concerns:
  *
- * Anonymous callers get all-zero counters and a `signedIn:false` flag so
- * the dashboard renders without errors but tells the user to sign in for
- * real stats.
+ *   1. **Activity counters** (account-wide, DB-backed) — searchesToday,
+ *      savedAssets, exportsMade, trackedContributors, importedAssets.
+ *      These never depend on which provider answered; they are always a
+ *      truthful read of the user's own database rows. The `importedAssets`
+ *      counter respects the active dataset scope so the figure matches
+ *      what they'll see in Search / Portfolio / etc.
+ *
+ *   2. **Analytics rollup** (provider-derived) — totalDownloads,
+ *      averagePerformanceScore, contentBreakdown, topPerformers,
+ *      keywordHighlights, trendingKeywords. These come from
+ *      `runDashboard()`, which honors the active dataset scope and falls
+ *      back to mock when the chosen provider can't fulfill the request.
+ *      Each metric carries an `*Available` companion so the UI can render
+ *      `Unavailable` instead of fake zeros (e.g. official public-metadata
+ *      source has no verified download counts).
+ *
+ *   3. **Activity feeds** — recentSearches (persisted history) and
+ *      savedAssetsPreview (latest favorites). Both DB-backed; the saved
+ *      preview includes a per-row data-quality tag so the UI can label
+ *      saved-from-demo rows distinctly from saved-from-import rows.
+ *
+ * Anonymous callers receive zero counters + a demo provider envelope and
+ * a `signedIn:false` flag so the dashboard renders without errors but
+ * honestly tells the user to sign in for real stats.
  */
 export async function GET() {
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
 
   if (!userId) {
+    // Anonymous: still call the mock provider so the UI gets the same
+    // analytics envelope shape (just labeled `Demo Data`). Skipping the
+    // provider call would force the page to render two different shapes
+    // and add a special-case branch we don't actually need.
+    const analytics = await runDashboard();
     return NextResponse.json({
       signedIn: false,
       hasImportedData: false,
@@ -34,6 +59,15 @@ export async function GET() {
       datasetName: null,
       scopeReason: "guest",
       recentSearches: [],
+      savedAssetsPreview: [],
+      analytics,
+      provider: {
+        id: analytics.providerId ?? "mock",
+        name: analytics.providerName,
+        dataQuality: analytics.dataQuality,
+        capabilities: analytics.capabilities,
+        notice: analytics.notice,
+      },
     });
   }
 
@@ -56,12 +90,16 @@ export async function GET() {
     }
   }
 
+  const ctx = { userId, datasetScope: scopeInfo.scope };
+
   const [
     searchesToday,
     savedAssets,
     exportsMade,
     trackedContributors,
     recentSearches,
+    savedAssetsPreviewRows,
+    analytics,
   ] = await Promise.all([
     prisma.searchHistory.count({
       where: { userId, createdAt: { gte: startOfToday } },
@@ -91,7 +129,44 @@ export async function GET() {
         createdAt: true,
       },
     }),
+    prisma.favorite.findMany({
+      where: { userId },
+      orderBy: { savedAt: "desc" },
+      take: 6,
+      select: {
+        id: true,
+        assetId: true,
+        thumbnailUrl: true,
+        title: true,
+        contributorName: true,
+        downloads: true,
+        performanceScore: true,
+        savedAt: true,
+        keywordsJson: true,
+      },
+    }),
+    runDashboard(ctx),
   ]);
+
+  // Saved-asset preview is "what the user saved", not "what the active
+  // provider says". To stay honest, we tag each saved row with the
+  // active provider's data-quality so the UI shows a single consistent
+  // badge per row. (We don't persist a per-favorite quality snapshot
+  // yet — that's a follow-up if/when saved-asset audit becomes a PRD
+  // requirement.)
+  const savedAssetsPreview = savedAssetsPreviewRows.map((f) => ({
+    id: f.id,
+    assetId: f.assetId,
+    thumbnailUrl: f.thumbnailUrl,
+    title: f.title,
+    contributorName: f.contributorName,
+    downloads: f.downloads,
+    performanceScore: f.performanceScore,
+    keywords: parseJsonArray<string>(f.keywordsJson),
+    savedAt: f.savedAt,
+    dataQuality: analytics.dataQuality,
+    providerName: analytics.providerName,
+  }));
 
   return NextResponse.json({
     signedIn: true,
@@ -105,5 +180,14 @@ export async function GET() {
     datasetName: scopeInfo.datasetName ?? null,
     scopeReason: scopeInfo.reason,
     recentSearches,
+    savedAssetsPreview,
+    analytics,
+    provider: {
+      id: analytics.providerId ?? "mock",
+      name: analytics.providerName,
+      dataQuality: analytics.dataQuality,
+      capabilities: analytics.capabilities,
+      notice: analytics.notice,
+    },
   });
 }

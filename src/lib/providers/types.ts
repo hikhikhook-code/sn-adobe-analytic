@@ -64,6 +64,13 @@ export interface ProviderCapabilities {
   trending: ProviderFeatureSupport;
   /** Reverse / similar image search. */
   similarImage: ProviderFeatureSupport;
+  /**
+   * Dashboard analytics rollup (top performers, content breakdown, keyword
+   * highlights, trending widget data). When `partial`, the provider will
+   * still return a result envelope but most metric-availability flags will
+   * be `false` and the UI must render `Unavailable` instead of fake zeroes.
+   */
+  dashboard: ProviderFeatureSupport;
   /** Whether this provider can return verified download counts. When
    *  `false`, results should set `metricsAvailable: false` and the UI
    *  must render `Unavailable` instead of fake zeroes. */
@@ -315,6 +322,60 @@ export interface ProviderTrendingResult extends ProviderResultEnvelope {
 }
 
 /**
+ * Dashboard analytics — provider-derived rollup served by
+ * `GET /api/dashboard`. Intentionally returns *only* analytics fields the
+ * provider can derive itself; account-wide counters (searches today,
+ * exports made, saved-asset count, recent searches) are layered on top by
+ * the API route from the database, regardless of provider.
+ *
+ * Every metric ships with an `*Available` companion so the UI can render
+ * `Unavailable` instead of fake zeroes when a provider can't honestly
+ * derive the figure (e.g. official public-metadata source has no verified
+ * download counts).
+ */
+export interface DashboardKeywordHighlight {
+  keyword: string;
+  /** Number of assets in scope tagged with this keyword. */
+  assets: number;
+  /** Total downloads attributed to assets with this keyword. */
+  downloads: number;
+  /** `false` when downloads are not derivable from the active provider. */
+  metricsAvailable: boolean;
+}
+
+export interface ProviderDashboardResult extends ProviderResultEnvelope {
+  /** Total assets in the active dataset scope (manual: imported assets;
+   *  mock: 0; official: not derivable). */
+  importedAssets: number;
+  importedAssetsAvailable: boolean;
+
+  /** Sum of downloads across the active scope. */
+  totalDownloads: number;
+  totalDownloadsAvailable: boolean;
+
+  /** Mean performance score (0..100) across in-scope assets. */
+  averagePerformanceScore: number;
+  averagePerformanceScoreAvailable: boolean;
+
+  /** Per-content-type asset counts + percentages. */
+  contentBreakdown: { type: string; count: number; pct: number }[];
+  contentBreakdownAvailable: boolean;
+
+  /** Top performing assets in the active scope, ranked by downloads. */
+  topPerformers: TopPerformer[];
+  topPerformersAvailable: boolean;
+
+  /** Top keywords by frequency / download volume in the active scope. */
+  keywordHighlights: DashboardKeywordHighlight[];
+  keywordHighlightsAvailable: boolean;
+
+  /** Trending keywords widget data (subset of `/trending` for the
+   *  dashboard widget). */
+  trendingKeywords: TrendingKeyword[];
+  trendingKeywordsAvailable: boolean;
+}
+
+/**
  * PRD §5 Similar Image Search request. The PRD scope intentionally rules
  * out real visual AI / pixel hashing for this PR — providers receive only
  * the textual signal we can derive from the upload (URL, filename, hint).
@@ -372,6 +433,13 @@ export interface DataProvider {
     req: ProviderSimilarRequest,
     ctx?: ProviderContext,
   ): Promise<ProviderSimilarResult>;
+  /**
+   * Dashboard rollup — top performers, content breakdown, keyword
+   * highlights, trending widget data. Account-wide counters (search
+   * history, exports, favorites) are NOT a provider concern; the API
+   * layer queries the DB directly for those.
+   */
+  dashboard(ctx?: ProviderContext): Promise<ProviderDashboardResult>;
 }
 
 /**
