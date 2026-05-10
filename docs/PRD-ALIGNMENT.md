@@ -122,9 +122,11 @@ Status legend:
 | 5.8 | **Seasonal trends** | **Implemented (estimated)** (mock + manual) | Manual buckets each keyword's lifetime downloads by upload month, requires ≥ 6 distinct months and a peak-vs-average lift ≥ 1.5× before labeling a keyword seasonal — keywords without enough months render `Unavailable` rather than fabricating a peak. Mock uses a fixed seasonal table tagged `Demo Data`. The seasonal panel always shows the `Estimated` data-quality badge on imported data because the signal is derived from upload distribution, not search-volume telemetry. |
 | 5.8 | Trending CSV export | **Implemented** | `/api/trending/export` POST endpoint produces a five-section CSV (meta, trending keywords, rising niches, top performers, seasonal trends). Honors `metricsAvailable` and `capabilities.downloadsAvailable`: unavailable cells render `Unavailable`, never fake `0`. Records an `ExportHistory` row with `type = "trending"`, the active filter set, and the dataset scope tag. |
 | 5.8 | Official Adobe trending | **Unavailable / honest** | Public-metadata sources do not expose aggregated trending search volume; the provider therefore advertises `trending: "unsupported"` in its capabilities and `runProvider` falls back to the manual / mock provider so the UI always renders something usable. The "Trending not supported" empty-state surfaces only if a future configuration explicitly chooses official-only without fallback. |
-| 6 | **Auth** — credentials + Google OAuth | **Implemented** | NextAuth.js with credentials + Google. Email verification + forgot-password flow stubbed; not yet wired to a mailer. |
+| 6 | **Auth** — credentials + Google OAuth | **Implemented** | NextAuth.js with credentials + Google. Google provider is wired conditionally: when `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED=1` are all set, the login/register pages render an enabled "Continue with Google" button; otherwise the button renders disabled with "not configured for this deployment" copy. See §11 for the full PR #16 auth status. |
+| 6 | **Forgot / reset password** | **Implemented (dev-mailer pending)** | `/auth/forgot-password` + `/auth/reset-password` pages + `/api/auth/forgot-password` + `/api/auth/reset-password` endpoints. Tokens are 32-byte random, bcrypt-hashed in the `PasswordResetToken` table, one-time use, 60-min expiry. The forgot-password endpoint always returns a neutral 200 (no email enumeration). In dev mode the response includes a clickable reset URL; production will email it once the mailer wiring lands. See §11. |
+| 6 | **Device limit** (foundation) | **Foundation — not enforced yet** | PRD device limits (FREE/STARTER 1, PRO 3, ANNUAL 5) are surfaced via `/api/devices` + `/auth/device-limit` and a Settings card. Every sign-in writes a best-effort `Device` row. Soft revoke (`isActive=false`) is supported. Hard blocking of sign-ins over the limit is intentionally deferred — see §11 for the rationale. |
 | 7 | **Pricing / SaaS plans** | **Pending** | Plan field exists in `User` schema; gating + Stripe / PayPal / Cryptomus checkout not implemented. |
-| 8 | **Database schema** | **Implemented** | Prisma schema covers `User`, `Account`, `Session`, `Device`, `SearchHistory`, `Favorite`, `ExportHistory`, `ImportedDataset`, `ImportedAsset`. |
+| 8 | **Database schema** | **Implemented** | Prisma schema covers `User`, `Account`, `Session`, `Device`, `PasswordResetToken`, `SearchHistory`, `Favorite`, `Collection`, `SavedSearch`, `ExportHistory`, `ImportedDataset`, `ImportedAsset`. |
 
 ---
 
@@ -564,3 +566,59 @@ undo the promise of the `Verified` badge. Users see a truthful
   deferred per the PRD brief.
 - Notifications for track-changes deltas (email, in-app). The UI shows
   the delta chip; the user decides what to do with it.
+
+
+
+---
+
+## 11. Auth completion — status by capability (PR #16)
+
+PR #16 promotes the auth surface from "credentials + Google stub" to a
+working PRD §6 footprint, while keeping enforcement-risky pieces
+(device-limit hard blocking, production email delivery) deliberately
+deferred so shipping them doesn't lock users out of their accounts.
+
+### Capability × status matrix
+
+| Capability | Status | Notes |
+| --- | --- | --- |
+| Credentials sign-in / sign-up | **Implemented** | Unchanged from PR #1. Register → auto sign-in → `/dashboard`. Duplicate-email returns a structured 409 with a "Go to sign in" action link. |
+| Google OAuth — enabled path | **Implemented** | When `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` (server) and `NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED=1` (client) are all set, the login/register pages render an enabled "Continue with Google" button that kicks off the standard `next-auth` redirect flow. Email-matched account linking is enabled (`allowDangerousEmailAccountLinking: true`) so a credentials user can later sign in with Google using the same email without an `OAuthAccountNotLinked` error. |
+| Google OAuth — missing-env path | **Implemented (graceful disable)** | When the client flag is off, the button stays visible but disabled with a "Sign in with Google is not configured for this deployment" tooltip + subtitle. No client-side round-trip needed to know the state. |
+| Forgot-password page | **Implemented** | `/auth/forgot-password` — email input, request button, loading state, error state, and a neutral "Check your inbox" success state (same copy whether or not the email is registered — prevents user enumeration). Dev mode shows a clickable reset URL on success; production never exposes the plaintext token. |
+| Reset-password page | **Implemented** | `/auth/reset-password?uid=&token=` — token presence check, new + confirm password inputs (8+ char client-side validation, mismatch check, 8+ char server-side re-check), loading state, error state, success path redirects to `/auth/login?reset=1` which shows a "Password updated, sign in" banner. |
+| `POST /api/auth/forgot-password` | **Implemented** | Always 200 for valid email format; issues a `PasswordResetToken` row only when the user exists AND has a `hashedPassword`. Pre-invalidates any prior pending tokens for the user so the mailbox never has two live links at once. Dev-only response fields (`devResetUrl`, `devExpiresAt`, `devNote`) are never populated in production. |
+| `POST /api/auth/reset-password` | **Implemented** | Validates `{ userId, token, password }` via zod. `consumeResetToken` does a bounded bcrypt scan over pending tokens (cap 5, ordered by newest), race-free one-time consume via `updateMany({ where: { id, usedAt: null }})`, and on success invalidates every remaining pending token for the user. Never logs the plaintext; never distinguishes "bad user" / "expired" / "already used" in the response. |
+| Token storage | **Implemented (secure)** | New `PasswordResetToken` model: `tokenHash` (bcrypt cost 10), `expiresAt` (60 min TTL), `usedAt` (one-time use), `createdAt`. The plaintext is 32 random bytes, URL-safe base64. |
+| Email delivery | **Pending** | PR #16 is auth foundation — it does NOT ship a mailer. Dev mode returns the reset URL inline so local testing works without SMTP. Productionizing this only requires plugging a `sendMail()` call into `forgot-password/route.ts` at the marked comment; no schema/API contract changes needed. |
+| Device logging on sign-in | **Implemented (best-effort)** | NextAuth `events.signIn` writes a `Device` row per successful sign-in (credentials OR Google). Device-logging failures are swallowed so they never block authentication. |
+| Device limit surfacing | **Implemented (foundation)** | `/api/devices` returns `{ plan, limit, activeCount, overLimit, devices[] }` for the signed-in user. `/auth/device-limit` renders the list with soft-revoke buttons; the Settings page shows a compact "X of Y devices used" card linking to the full page. PRD-specified limits: FREE 1, STARTER 1, PRO 3, ANNUAL 5. |
+| Device limit enforcement (hard block) | **Pending (by design)** | Signing a user out automatically when they exceed the cap requires a "force sign-out other device" UX we haven't built yet. Shipping the hard-block without that escape hatch is a lockout risk — we log every device and expose the count now so the next PR has everything it needs, but we don't reject sign-ins on overflow yet. |
+| Duplicate-email / invalid-password copy | **Implemented** | Login collapses "no such user" + "wrong password" into one message (preserves NextAuth's anti-enumeration posture) but links directly to `/auth/register?email=<typed>`. Register 409 links directly to `/auth/login?email=<typed>`. Both pages use `role="alert"` + `aria-live="polite"` for screen readers. |
+| Post-login redirect | **Implemented** | `callbackUrl` is allow-listed to same-origin relative paths (starts with `/` and not `//`). Password-reset success redirects to `/auth/login?reset=1`. |
+| Guest redirect flows | **Unchanged** | Pre-PR #16 behavior preserved: `/dashboard` redirects to `/auth/login` when signed out; guest routes like `/search` still render with demo data. |
+
+### Security notes
+
+- No raw reset tokens are stored or logged. `bcrypt.compare` is constant-time;
+  we never string-compare plaintext against plaintext.
+- `NEXTAUTH_SECRET` strict-runtime validation (placeholder / too-short /
+  `-not-used-at-runtime` rejection) is unchanged — PR #16 imports the
+  same `assertNextAuthSecret()` helper.
+- Google credentials are read from env at module load and are never sent
+  to the client. The client reads only `NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED`
+  to decide how to render the button.
+- `POST /api/auth/forgot-password` returns the same response whether or
+  not the email exists; both success branches construct an identical
+  response object before the DB-touching work runs.
+
+### Explicit non-goals in this PR
+
+- Email sending wiring (SMTP / Resend / SES).
+- Device-limit hard-enforcement on sign-in.
+- Rate-limiting the forgot-password endpoint (deferred to the rate-limit
+  middleware PR so it shares a policy with `/api/import` and the export
+  endpoints).
+- 2FA / TOTP / WebAuthn.
+- Email verification flow (separate PR).
+- Pricing / SaaS gating (Phase 4).
