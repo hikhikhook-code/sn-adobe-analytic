@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 
 export interface SimpleSelectProps
   extends React.SelectHTMLAttributes<HTMLSelectElement> {
-  options: ReadonlyArray<{ value: string; label: string }>;
+  options: ReadonlyArray<{ value: string; label: string; disabled?: boolean }>;
 }
 
 const SimpleSelect = React.forwardRef<HTMLSelectElement, SimpleSelectProps>(
@@ -25,7 +25,7 @@ const SimpleSelect = React.forwardRef<HTMLSelectElement, SimpleSelectProps>(
         {...props}
       >
         {options.map((o) => (
-          <option key={o.value} value={o.value}>
+          <option key={o.value} value={o.value} disabled={o.disabled}>
             {o.label}
           </option>
         ))}

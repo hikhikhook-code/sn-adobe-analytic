@@ -93,9 +93,12 @@ Status legend:
 | 5.1 | **Search** — keyword search, content-type / sort / AI filters, results grid, pagination | **Implemented** (mock + manual + official) | All filters honored on every provider. Result cards keep all PRD fields (id, title, thumbnail, contributor, categories, content type, upload date, keywords, Adobe Stock URL). |
 | 5.1 | Download count + Performance score on result card | **Mock / import-based** | Mock + manual show real numbers (with `Demo Data` / `Verified` badges respectively). Official shows `—` + `Unavailable` because public pages don't expose verified downloads. |
 | 5.1 | Recent searches + Saved/favorites + AI saturation indicator | **Implemented** (mock + manual + official) | Provider-agnostic; all sources flow through the same UI. |
-| 5.2 | **Portfolio Tracker** — contributor lookup, totals, content breakdown, top keywords | **Implemented** (mock + manual) / **Partial** (official) | Mock + manual fully supported. Official returns empty totals + a "partial supported" notice when not configured; once configured, returns real metadata with `Public Metadata` quality. |
-| 5.2 | Best sellers list + monthly trend chart | **Estimated** | Computed from imported data when available. Official: monthly trend is empty (cannot reconstruct from public metadata). |
-| 5.2 | Compare contributors | **Pending** | UI not yet exposed. |
+| 5.2 | **Portfolio Tracker** — contributor lookup, overview cards, content breakdown, asset grid, top keywords | **Implemented** (mock + manual) / **Partial** (official) | `/portfolio` accepts contributor name, numeric ID, or stock.adobe.com URL (parsed by `parseContributorInput`). Mock + manual fully supported. Official returns empty totals + a "partial supported" notice when not configured; once configured, returns real metadata with `Public Metadata` quality and `metricsAvailable: false` on every asset so download/avg/best stats render `—` + `Unavailable`. |
+| 5.2 | Best sellers (top 10) | **Implemented** (mock + manual) / **Partial** (official) | Mock + manual sort by downloads. Official falls back to performance-score sort and renders "Unavailable" per row. |
+| 5.2 | Monthly trends (12-month chart) | **Estimated** (mock + manual) / **Unavailable** (official) | Computed from imported data when available; tagged `Estimated` (best-effort, derived from upload-date buckets). Official cannot reconstruct time-series downloads from public metadata, so the panel renders an honest "Unavailable" state. |
+| 5.2 | Keyword analysis | **Implemented** (mock + manual) / **Partial** (official) | Frequency table + per-keyword average downloads. Avg-download column shows `—` when downloads aren't available from the active provider. Copy-to-clipboard supported on every provider. |
+| 5.2 | Compare contributors | **Foundation — Coming Soon** | A/B input UI present on `/portfolio`; submitting shows a "Coming Soon" notice. Side-by-side metric comparison is intentionally deferred to a later PR. |
+| 5.2 | Portfolio Export CSV (multi-section: overview + asset list + keyword analysis) | **Implemented** | Dedicated `/api/portfolio/export` endpoint produces a 3-section CSV. Honors `metricsAvailable` and `capabilities.downloadsAvailable`: unavailable cells render `Unavailable`, never fake `0`. Records an export-history row with the active dataset scope. |
 | 5.3 | **Heat Map** — niche grid, competition coloring, trends | **Implemented** (mock + manual) | Manual provider aggregates real keywords from imports. Mock provides demo niches. Official falls back to manual/mock; UI surfaces the source via the data-source banner. |
 | 5.3 | Niche detail drilldown + Opportunity finder | **Pending** | Niche tile click target / detail page not wired yet. |
 | 5.4 | **Dashboard** — quick stats, recent searches, saved preview, search-usage progress | **Implemented** | Reads search history, favorites, exports tables. |
@@ -206,7 +209,48 @@ and it will be sent as `Authorization: Bearer <key>` on every request.
 
 ---
 
-## 5. What this PR (#8) added
+## 5. Portfolio Tracker — feature × provider matrix
+
+PR #9 brought the Portfolio Tracker close to the PRD §5.2 spec. Per-provider
+support breaks down as follows:
+
+| Sub-feature | mock | manual (CSV) | official (configured) | official (unset) |
+| --- | --- | --- | --- | --- |
+| Contributor lookup by name / ID / URL | yes (demo set) | yes (matches imported `contributorName` / `contributorId`) | partial (HTTP boundary) | empty + notice |
+| Total assets / Total downloads / Avg downloads | demo | verified from import | partial (downloads `Unavailable`) | empty |
+| Best performing asset | demo | verified | partial (`Unavailable` if no downloads) | empty |
+| Portfolio age (joined-date) | demo | verified | metadata if endpoint provides | empty |
+| Content breakdown (photo/illustration/vector/video/other) | demo | verified | metadata-derived | empty |
+| Best sellers (top 10) | demo | sorted by verified downloads | sorted by perf-score, "Unavailable" per row | empty |
+| Asset grid + per-asset selection | yes | yes | yes (downloads cells `Unavailable`) | empty |
+| Keyword analysis (frequency + avg downloads) | demo | verified avg | frequency only; avg `—` | empty |
+| 12-month monthly trends | demo | estimated from upload-date buckets | rendered as "Unavailable" panel (cannot reconstruct from public metadata) | "Unavailable" |
+| Compare contributors | foundation only — A/B input + "Coming Soon" notice | foundation only | foundation only | foundation only |
+| Export CSV (multi-section) | yes (Demo Data labels) | yes (Verified labels) | yes ("Unavailable" cells where downloads aren't provided) | yes (empty / contextual) |
+
+**Which metrics depend on imported data?**
+
+- Total downloads, Total downloads in Best Sellers, Avg downloads, Avg
+  downloads per keyword, and Monthly Trends are all **download-bearing**
+  metrics. They render verified numbers only when the active provider
+  declares `capabilities.downloadsAvailable === true` (mock + manual).
+- Asset count, content type breakdown, keyword frequency, and the
+  contributor name / join date are **metadata** metrics — they work on
+  every provider including the official public-metadata one.
+
+**Which metrics are unavailable from official / public providers?**
+
+- Verified downloads (per asset and aggregated).
+- Time-series monthly download trends.
+- Sales / revenue (never claimed for any provider).
+
+The UI labels each unavailable figure as `Unavailable` rather than `0` so
+users always know whether a number is a real download count, an estimate,
+or simply not available from their current data source.
+
+---
+
+## 6. What this PR (#8) added
 
 - `ProviderCapabilities` map on every provider (search / contributor /
   heatmap / trending / similar-image + verified-downloads flag).
