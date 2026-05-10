@@ -27,6 +27,10 @@ import type {
 const PROVIDERS: Record<string, DataProvider> = {
   mock: mockProvider,
   official: officialAdobeProvider,
+  // `public` is an alias for the official public-metadata provider.
+  // PR #22 standardized the public-metadata name; `official` stays
+  // around for back-compat with existing .env files and docs.
+  public: officialAdobeProvider,
   manual: manualImportProvider,
 };
 

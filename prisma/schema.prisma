@@ -283,41 +283,70 @@ model SavedSearch {
   @@index([userId, collectionId])
 }
 
-model CachedAsset {
-  id                String   @id @default(cuid())
-  adobeStockId      String   @unique
-  thumbnailUrl      String
-  title             String
-  downloads         Int
-  performanceScore  Int
-  downloadsPerMonth Float
-  categoriesJson    String   @default("[]") // JSON-encoded
-  contentType       String
-  uploadDate        DateTime
-  contributorName   String
-  contributorId     String
-  isPremium         Boolean  @default(false)
-  isAiGenerated     Boolean  @default(false)
-  keywordsJson      String   @default("[]")
-  lastScrapedAt     DateTime @default(now())
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+/// Cache layer for the public-metadata provider (PR #22).
+///
+/// The public metadata provider pulls search metadata off publicly
+/// visible Adobe Stock pages (via the allow-listed HTTP scraper OR a
+/// configured first-party endpoint). Hitting Adobe Stock on every
+/// request would be wasteful + abusive; this table gives us a
+/// cache-first read path.
+///
+/// Shape notes:
+///   - `source` distinguishes rows produced by different upstreams
+///     ("public_scrape" from our Axios + Cheerio scraper,
+///      "official_api" from a configured HTTP boundary). Two providers
+///     can coexist without clobbering each other.
+///   - `payloadJson` holds the exact `ProviderSearchResult` envelope
+///     the UI consumes. Cache hits are one SELECT + one JSON.parse —
+///     no joins, no hydration.
+///   - `expiresAt` is an absolute timestamp. Reads compare against
+///     `now()` and treat past rows as stale (served as cache miss but
+///     kept around as a graceful-fallback source if the live fetch
+///     fails or is blocked). Per PR #22 brief, stale-but-present
+///     beats empty when the live fetch can't complete.
+///   - `fetchedAt` is retained for observability (how old is this
+///     payload?) and is independent of `expiresAt` so we can change
+///     TTL without rewriting rows.
+///
+/// Old shape (pre-PR #22) had per-field columns + a foreign-key link to
+/// CachedAsset; no code ever read it. Replaced with the
+/// single-payload model because (a) the provider envelope changes over
+/// time and we don't want a schema migration every time, (b) the
+/// public scraper may not have every PRD field — forcing NOT NULL
+/// columns would push us to fake values we don't have.
+model CachedSearch {
+  id          String   @id @default(cuid())
+  source      String   @default("public_scrape")
+  keyword     String
+  sort        String   @default("relevance")
+  contentType String   @default("all")
+  aiFilter    String   @default("all")
+  page        Int      @default(1)
+  payloadJson String
+  fetchedAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@unique([source, keyword, sort, contentType, aiFilter, page])
+  @@index([expiresAt])
 }
 
-model CachedSearch {
-  id               String   @id @default(cuid())
-  keyword          String
-  sort             String
-  contentType      String
-  aiFilter         String
-  page             Int      @default(1)
-  totalResults     Int
-  resultIdsJson    String   @default("[]")
-  competitionLevel String?
-  aiSaturation     Float?
-  scrapedAt        DateTime @default(now())
+/// Cache layer for an individual asset's public metadata. Reserved
+/// for the asset-detail drilldown path (PRD §5.1 "full title,
+/// keywords, upload date, contributor, content type, premium status").
+/// TTL is longer than CachedSearch because detail pages change much
+/// more slowly than search results. `payloadJson` carries the same
+/// `SearchAsset` shape the provider emits, so downstream code treats
+/// it identically to a live response.
+model CachedAsset {
+  id          String   @id @default(cuid())
+  source      String   @default("public_scrape")
+  assetId     String
+  payloadJson String
+  fetchedAt   DateTime @default(now())
+  expiresAt   DateTime
 
-  @@unique([keyword, sort, contentType, aiFilter, page])
+  @@unique([source, assetId])
+  @@index([expiresAt])
 }
 
 model ExportHistory {

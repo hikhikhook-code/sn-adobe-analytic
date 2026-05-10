@@ -57,7 +57,13 @@ export function DataSourceBanner({
   providerName,
   className,
 }: DataSourceBannerProps) {
-  const state = deriveState({ scope, datasetName, hasAnyDatasets, reason });
+  const state = deriveState({
+    scope,
+    datasetName,
+    hasAnyDatasets,
+    reason,
+    dataQuality,
+  });
 
   return (
     <div
@@ -119,11 +125,13 @@ function deriveState({
   datasetName,
   hasAnyDatasets,
   reason,
+  dataQuality,
 }: {
   scope: DatasetScope;
   datasetName?: string | null;
   hasAnyDatasets?: boolean;
   reason?: ScopeReason;
+  dataQuality?: DataQuality;
 }): DerivedState {
   // Warning variant when the user's selected dataset is gone.
   if (reason === "orphaned_fallback_all") {
@@ -136,6 +144,24 @@ function deriveState({
       iconBoxClass: "border-amber-300 bg-amber-100 text-amber-700",
       cta: { href: "/import", label: "Manage datasets" },
       ctaVariant: "outline",
+    };
+  }
+
+  // Public-metadata provider: distinct banner so the user understands
+  // this page is wired to publicly visible Adobe Stock pages, not a
+  // demo or imported-CSV dataset. We show it regardless of scope
+  // because the provider selection (via DATA_PROVIDER=public) is
+  // orthogonal to the per-user dataset scope.
+  if (dataQuality === "public_metadata") {
+    return {
+      title: "Public Adobe Stock metadata",
+      description:
+        "Metadata (title, thumbnail, Adobe Stock URL, contributor when visible) is pulled from " +
+        "publicly visible Adobe Stock pages. Download counts and performance metrics are not available " +
+        "from public pages and are labeled Unavailable below.",
+      Icon: Database,
+      containerClass: "border-violet-200 bg-violet-50 text-violet-900",
+      iconBoxClass: "border-violet-300 bg-violet-100 text-violet-700",
     };
   }
 

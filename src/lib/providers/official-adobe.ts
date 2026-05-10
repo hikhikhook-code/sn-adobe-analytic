@@ -1,6 +1,17 @@
 import { calculateCompetitionLevel } from "@/lib/scoring";
 import { normalizeAdobeStockUrl } from "@/lib/adobe-stock-link";
 import { RESULTS_PER_PAGE } from "@/lib/constants";
+import {
+  SEARCH_TTL_MS,
+  readSearchCache,
+  writeSearchCache,
+} from "@/lib/scraper/cache";
+import {
+  fetchPublicSearchPage,
+  isPublicScraperEnabled,
+  type ScrapeResult,
+  type ScrapedAsset,
+} from "@/lib/scraper/public-adobe-stock";
 import type {
   AiFilter,
   ContentType,
@@ -22,60 +33,67 @@ import type {
 /**
  * Public-metadata / "official" data provider.
  *
- * This provider is the clean integration boundary for an authoritative or
- * public-metadata source — for example:
- *   - The Adobe Stock Search API (when contributor analytics endpoints
- *     become available to your tenant).
- *   - A Cloudflare Worker / proxy you operate that mirrors public Adobe
- *     Stock pages with respect to robots.txt + rate limits.
- *   - A first-party signed analytics export (`dataQuality: "verified"`).
+ * This provider is the integration boundary for an authoritative or
+ * public-metadata source. It accepts data from two upstreams and a
+ * shared cache:
  *
- * It intentionally does NOT include any of:
+ *   1. **HTTP boundary** (preferred). If `OFFICIAL_PROVIDER_BASE_URL`
+ *      is set, calls hit a thin JSON adapter you operate — for
+ *      example a Cloudflare Worker proxying public Adobe Stock
+ *      pages, or a first-party signed analytics feed. Payloads are
+ *      tagged `public_metadata` (promote to `verified` at the
+ *      adapter layer if you've wired it to a signed feed).
+ *
+ *   2. **Built-in public scraper** (PR #22). If the HTTP boundary is
+ *      not configured AND `PUBLIC_SCRAPER_ENABLED=true` is set, the
+ *      provider falls through to `fetchPublicSearchPage` which reads
+ *      publicly visible Adobe Stock search HTML with Axios + Cheerio.
+ *      All safety rails — single user-agent, rate-limit, timeout,
+ *      one retry, no anti-bot bypass — live in
+ *      `src/lib/scraper/public-adobe-stock.ts`.
+ *
+ *   3. **Cache layer** (PR #22). Every search goes through
+ *      `readSearchCache` first. Fresh hits short-circuit both
+ *      upstreams and return the previously stored payload. Stale
+ *      hits are kept in-memory and used as a GRACEFUL FALLBACK if
+ *      the live fetch fails or is blocked, so the UI doesn't go
+ *      dark under upstream flakes.
+ *
+ * The provider intentionally does NOT include any of:
  *   - private/internal Adobe APIs
  *   - proxy rotation
  *   - user-agent evasion
- *   - anti-bot bypass
- *   - direct scraping that ignores rate limits or robots.txt
+ *   - captcha / anti-bot bypass
+ *   - fake Adobe download counts
  *
- * Until `OFFICIAL_PROVIDER_BASE_URL` is configured the provider returns
- * empty, honestly-labeled responses (with `notice` and
- * `metricsAvailable: false`). Operators wire it up by:
- *   1. Standing up an HTTP service that maps to {@link OfficialPublicEndpoints}.
- *   2. Setting `OFFICIAL_PROVIDER_BASE_URL` and (optionally)
- *      `OFFICIAL_PROVIDER_API_KEY`.
- *   3. Setting `DATA_PROVIDER=official` (or letting per-user auto-promotion
- *      pick it up).
+ * Until ONE of `OFFICIAL_PROVIDER_BASE_URL` or
+ * `PUBLIC_SCRAPER_ENABLED=true` is set the provider returns honestly-
+ * labeled empty responses with a `notice` so the UI can render the
+ * "not configured" state without substituting mock data.
  *
- * The provider tags every response as `dataQuality: "public_metadata"`.
- * Promote to `verified` only when wiring it to a first-party signed feed
- * (see README §"Data quality").
+ * Data-quality tag: `public_metadata` on both paths. Promote to
+ * `verified` only at an adapter that wraps a first-party signed feed.
  */
 
 const PROVIDER_ID = "official";
 const PROVIDER_NAME = "Public Metadata Provider";
 const FETCH_TIMEOUT_MS = 8_000;
 
-/**
- * Capability map. The provider can serve search + contributor metadata as
- * soon as it's configured. Heatmap / trending / similar-image require
- * server-side aggregation we don't expose yet — those fall back to manual
- * (when the user has imported data) or mock.
- */
 const CAPABILITIES: ProviderCapabilities = {
   search: "supported",
   contributor: "partial",
   heatmap: "unsupported",
   trending: "unsupported",
   similarImage: "unsupported",
-  // Dashboard rollup needs per-user portfolio analytics (downloads,
-  // performance, content breakdown) that public-metadata pages do not
-  // expose. We return an honest "partial" envelope instead of throwing
-  // so the UI can render `Unavailable` placeholders rather than
-  // silently substituting demo data.
+  // Dashboard rollup needs per-user portfolio analytics that public-
+  // metadata pages do not expose. We return an honest "partial"
+  // envelope (every `*Available: false`) instead of throwing so the
+  // UI renders `Unavailable` placeholders rather than substituting
+  // demo numbers.
   dashboard: "partial",
   // Public pages do not expose verified download numbers. UI renders
-  // `Unavailable` for downloads / performance / downloadsPerMonth on every
-  // result this provider returns.
+  // `Unavailable` for downloads / performance / downloadsPerMonth on
+  // every result this provider returns.
   downloadsAvailable: false,
 };
 
@@ -87,34 +105,9 @@ interface OfficialProviderConfig {
 function readConfig(): OfficialProviderConfig | null {
   const baseUrl = process.env.OFFICIAL_PROVIDER_BASE_URL?.trim();
   if (!baseUrl) return null;
-  // Strip trailing slash so we can append `/search` etc. cleanly.
   const normalized = baseUrl.replace(/\/+$/, "");
   const apiKey = process.env.OFFICIAL_PROVIDER_API_KEY?.trim() || undefined;
   return { baseUrl: normalized, apiKey };
-}
-
-/**
- * Shape we expect from the configured public-metadata endpoint. Keeping it
- * narrow + Adobe-shaped so a thin adapter can sit in front of any source
- * (Adobe Stock Search API, mirror, signed feed, …).
- */
-export interface OfficialPublicEndpoints {
-  /**
-   * `GET ${baseUrl}/search?keyword=...&contentType=...&sort=...&page=...`
-   *
-   * Returns `{ totalResults, results: PublicAsset[] }`. The asset shape
-   * mirrors the PRD's documented search response. Numeric download fields
-   * are OPTIONAL — sources that can only return metadata should omit them
-   * and rely on `metricsAvailable: false` in the rendered card.
-   */
-  search: never;
-  /**
-   * `GET ${baseUrl}/contributor?query=...`
-   *
-   * Returns minimal contributor metadata. Aggregations (avg, best, monthly
-   * trend) are computed client-side from the asset list when present.
-   */
-  contributor: never;
 }
 
 interface PublicAsset {
@@ -153,7 +146,6 @@ function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
     if (signal.aborted) ctrl.abort();
     else signal.addEventListener("abort", () => ctrl.abort(), { once: true });
   }
-  // Best-effort cleanup; runtime will also clear via AbortSignal cleanup.
   ctrl.signal.addEventListener("abort", () => clearTimeout(timer), {
     once: true,
   });
@@ -167,9 +159,6 @@ async function fetchJson<T>(url: string, cfg: OfficialProviderConfig): Promise<T
     method: "GET",
     headers,
     signal: withTimeout(undefined, FETCH_TIMEOUT_MS),
-    // Don't cache through Next's data cache by default — analytics views
-    // want fresh data, and a cached "endpoint not reachable" reply would
-    // be worse than a fresh failure.
     cache: "no-store",
   });
   if (!res.ok) {
@@ -182,8 +171,8 @@ async function fetchJson<T>(url: string, cfg: OfficialProviderConfig): Promise<T
 
 /**
  * Hydrate a raw public asset into our SearchAsset shape. Missing numeric
- * fields are zero-filled BUT `metricsAvailable` is set to `false` so the UI
- * never claims the zero is a real Adobe download number.
+ * fields are zero-filled BUT `metricsAvailable` is set to `false` so the
+ * UI never claims the zero is a real Adobe download number.
  */
 function toSearchAsset(raw: PublicAsset): SearchAsset {
   return {
@@ -201,11 +190,41 @@ function toSearchAsset(raw: PublicAsset): SearchAsset {
     isPremium: Boolean(raw.isPremium),
     isAiGenerated: Boolean(raw.isAiGenerated),
     keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
-    // PR #19: normalize `/id/` -> `/uk/` on any provider URL that
-    // carries the misleading Indonesian locale prefix. See
-    // src/lib/adobe-stock-link.ts for the rationale.
     adobeStockUrl:
       normalizeAdobeStockUrl(raw.adobeStockUrl) ?? raw.adobeStockUrl ?? "",
+    metricsAvailable: false,
+  };
+}
+
+/**
+ * Adapter: scraper output -> SearchAsset. The scraper doesn't return
+ * verified numbers — every row gets `metricsAvailable: false`.
+ */
+function scrapedToSearchAsset(raw: ScrapedAsset): SearchAsset {
+  // Prefer asset id from URL path when available; fall back to the
+  // normalized URL itself so the UI always has a stable React key.
+  const id = raw.assetId || raw.adobeStockUrl || raw.thumbnailUrl || Math.random().toString(36).slice(2);
+  return {
+    id,
+    thumbnailUrl: raw.thumbnailUrl ?? "",
+    title: raw.title ?? "(untitled)",
+    downloads: 0,
+    performanceScore: 0,
+    downloadsPerMonth: 0,
+    categories: [],
+    contentType: raw.contentType ?? "unknown",
+    // Public search tiles don't expose upload date. Use epoch 0 as a
+    // sentinel and `metricsAvailable: false` keeps the UI honest.
+    uploadDate: raw.uploadDate ?? new Date(0).toISOString(),
+    contributorName: raw.contributorName ?? "(unknown contributor)",
+    // contributorId intentionally blank — we refuse to link to
+    // /contributor/<id> (see adobe-stock-link.ts). The name drives
+    // the UI's keyword-search fallback link.
+    contributorId: "",
+    isPremium: Boolean(raw.isPremium),
+    isAiGenerated: Boolean(raw.isAiGenerated),
+    keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
+    adobeStockUrl: raw.adobeStockUrl ?? "",
     metricsAvailable: false,
   };
 }
@@ -230,6 +249,11 @@ function buildSearchUrl(
   return url.toString();
 }
 
+/**
+ * Build an "honestly empty" search envelope with the given notice. Used
+ * when the provider can't run (unconfigured, scrape blocked, no cache)
+ * so the UI still renders the page structure with an explanation.
+ */
 function emptySearchResult(notice: string): ProviderSearchResult {
   return {
     totalResults: 0,
@@ -268,76 +292,215 @@ function emptyContributorResult(
   };
 }
 
+/**
+ * Given a set of `SearchAsset`s, build the full `ProviderSearchResult`
+ * envelope (with AI saturation, content breakdown, etc.). Reused by
+ * both the HTTP-boundary and public-scraper paths so their envelopes
+ * stay identical modulo the `notice` string.
+ */
+function buildSearchEnvelope(
+  results: SearchAsset[],
+  total: number,
+  req: ProviderSearchRequest,
+  notice: string,
+): ProviderSearchResult {
+  const aiCount = results.filter((r) => r.isAiGenerated).length;
+  const counts: Record<string, number> = {};
+  for (const r of results) {
+    counts[r.contentType] = (counts[r.contentType] ?? 0) + 1;
+  }
+
+  const filtered = applyClientFilters(results, {
+    contentType: req.contentType,
+    aiFilter: req.aiFilter,
+  });
+  const sorted = applyClientSort(filtered, req.sort);
+
+  return {
+    totalResults: total,
+    competitionLevel: calculateCompetitionLevel(total),
+    aiSaturation: results.length
+      ? Math.round((aiCount / results.length) * 100)
+      : 0,
+    contentBreakdown: Object.entries(counts)
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count),
+    results: sorted,
+    dataQuality: "public_metadata",
+    providerName: PROVIDER_NAME,
+    providerId: PROVIDER_ID,
+    capabilities: CAPABILITIES,
+    notice,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Search — cache-first, then HTTP boundary (if configured), then public
+// scraper (if enabled), then graceful fallback to any stale cache.
+// ---------------------------------------------------------------------------
+
+async function searchViaHttpBoundary(
+  cfg: OfficialProviderConfig,
+  req: ProviderSearchRequest,
+): Promise<ProviderSearchResult> {
+  const url = buildSearchUrl(cfg, req);
+  const payload = await fetchJson<PublicSearchPayload>(url, cfg);
+  const results = (payload.results ?? []).map(toSearchAsset);
+  const total = payload.totalResults ?? results.length;
+  return buildSearchEnvelope(
+    results,
+    total,
+    req,
+    "Downloads and performance scores are not available from this source. " +
+      "Numbers shown elsewhere are derived only from public metadata.",
+  );
+}
+
+async function searchViaPublicScraper(
+  req: ProviderSearchRequest,
+): Promise<{ envelope: ProviderSearchResult; scrape: ScrapeResult } | null> {
+  if (!isPublicScraperEnabled()) return null;
+  const scrape = await fetchPublicSearchPage({
+    keyword: req.keyword,
+    contentType: req.contentType,
+    page: req.page,
+  });
+  if (scrape.status === "disabled") return null;
+  if (scrape.status !== "ok" && scrape.status !== "empty") {
+    // Transport-level issue. Let the caller decide whether to fall
+    // back to stale cache or surface an "unavailable" envelope.
+    return { envelope: scrapeUnavailableEnvelope(scrape, req), scrape };
+  }
+  const results = scrape.assets.map(scrapedToSearchAsset);
+  const total = scrape.totalResults ?? results.length;
+  const notice =
+    results.length > 0
+      ? "Public Adobe Stock metadata (scraped live). Downloads and performance " +
+        "are not available from public pages."
+      : "Public Adobe Stock search returned no parseable results for this query.";
+  return {
+    envelope: buildSearchEnvelope(results, total, req, notice),
+    scrape,
+  };
+}
+
+function scrapeUnavailableEnvelope(
+  scrape: ScrapeResult,
+  req: ProviderSearchRequest,
+): ProviderSearchResult {
+  const base = buildSearchEnvelope(
+    [],
+    0,
+    req,
+    (() => {
+      switch (scrape.status) {
+        case "blocked":
+          return (
+            "Public Adobe Stock declined the request " +
+            `(${scrape.reason ?? "blocked"}). ` +
+            "No bypass is attempted. Try again later."
+          );
+        case "timeout":
+          return "Public Adobe Stock timed out. No results available from the live source.";
+        case "network_error":
+          return "Could not reach Adobe Stock. No results available from the live source.";
+        default:
+          return "Public Adobe Stock fetch failed. No results available.";
+      }
+    })(),
+  );
+  return base;
+}
+
 export const officialAdobeProvider: DataProvider = {
   id: PROVIDER_ID,
   name: PROVIDER_NAME,
-  // We tag this provider as `public_metadata` (NOT `verified`). Operators
-  // wiring it to a signed first-party feed should override the data-quality
-  // tag at that integration's adapter layer.
   dataQuality: "public_metadata",
   capabilities: CAPABILITIES,
 
-  async search(req: ProviderSearchRequest) {
+  async search(req: ProviderSearchRequest): Promise<ProviderSearchResult> {
     const cfg = readConfig();
-    if (!cfg) {
-      // Don't throw — return an empty, honestly-labeled response so the
-      // UI can render the search page without falling all the way back
-      // to mock data. The caller (runProvider) will keep this and not
-      // substitute mock results for an `official` request.
+    const scraperOn = isPublicScraperEnabled();
+
+    // 0. Nothing configured: return a clean, honest empty state.
+    //    Cache reads are skipped on this branch because there's
+    //    nothing that would ever populate the cache.
+    if (!cfg && !scraperOn) {
       return emptySearchResult(
         "Public-metadata source not configured. Set OFFICIAL_PROVIDER_BASE_URL " +
-          "to point this provider at your authorized public-metadata endpoint.",
+          "(for a first-party HTTP adapter) or PUBLIC_SCRAPER_ENABLED=true (for " +
+          "the built-in public Adobe Stock scraper) to populate this page.",
       );
     }
 
-    const url = buildSearchUrl(cfg, req);
-    const payload = await fetchJson<PublicSearchPayload>(url, cfg);
-    const results = (payload.results ?? []).map(toSearchAsset);
-    const total = payload.totalResults ?? results.length;
-
-    // Keep the AI saturation + breakdown computations the same as
-    // mock/manual so downstream UI doesn't special-case providers.
-    const aiCount = results.filter((r) => r.isAiGenerated).length;
-    const counts: Record<string, number> = {};
-    for (const r of results) {
-      counts[r.contentType] = (counts[r.contentType] ?? 0) + 1;
+    // 1. Cache-first read. Use the upstream hint as the `source` tag
+    //    so rows produced by the HTTP boundary and by the scraper
+    //    don't step on each other.
+    const source = cfg ? "official_api" : "public_scrape";
+    const cacheKey = {
+      source: source as "public_scrape" | "official_api",
+      keyword: req.keyword,
+      sort: req.sort ?? "relevance",
+      contentType: req.contentType ?? "all",
+      aiFilter: req.aiFilter ?? "all",
+      page: req.page ?? 1,
+    };
+    const cached = await readSearchCache<ProviderSearchResult>(cacheKey);
+    if (cached?.fresh) {
+      return {
+        ...cached.payload,
+        // Refresh envelope fields in case the source signature or
+        // capability map has evolved since the payload was written.
+        providerId: PROVIDER_ID,
+        providerName: PROVIDER_NAME,
+        capabilities: CAPABILITIES,
+        dataQuality: "public_metadata",
+        notice: cached.payload.notice
+          ? `${cached.payload.notice} (cached ${formatAge(cached.fetchedAt)})`
+          : `Served from cache (${formatAge(cached.fetchedAt)} old).`,
+      };
     }
 
-    const filtered = applyClientFilters(results, {
-      contentType: req.contentType,
-      aiFilter: req.aiFilter,
-    });
-    const sorted = applyClientSort(filtered, req.sort);
+    // 2. Live fetch — HTTP boundary wins when configured.
+    if (cfg) {
+      try {
+        const envelope = await searchViaHttpBoundary(cfg, req);
+        await writeSearchCache(cacheKey, envelope, SEARCH_TTL_MS);
+        return envelope;
+      } catch (err) {
+        console.warn(
+          "[officialAdobeProvider] HTTP boundary failed:",
+          (err as Error).message,
+        );
+        if (cached) return staleCacheEnvelope(cached.payload, cached.fetchedAt);
+        throw err;
+      }
+    }
 
-    return {
-      totalResults: total,
-      competitionLevel: calculateCompetitionLevel(total),
-      aiSaturation: results.length
-        ? Math.round((aiCount / results.length) * 100)
-        : 0,
-      contentBreakdown: Object.entries(counts)
-        .map(([type, count]) => ({ type, count }))
-        .sort((a, b) => b.count - a.count),
-      results: sorted,
-      dataQuality: "public_metadata",
-      providerName: PROVIDER_NAME,
-      providerId: PROVIDER_ID,
-      capabilities: CAPABILITIES,
-      // Always remind the caller that downloads aren't verified from
-      // this source. The result-card handles the per-figure label too.
-      notice:
-        "Downloads and performance scores are not available from this source. " +
-        "Numbers shown elsewhere are derived only from public metadata.",
-    } satisfies ProviderSearchResult;
+    // 3. Public scraper branch. Only reached when the HTTP boundary
+    //    is unset AND the scraper is enabled.
+    const scraped = await searchViaPublicScraper(req);
+    if (scraped && scraped.scrape.status === "ok") {
+      await writeSearchCache(cacheKey, scraped.envelope, SEARCH_TTL_MS);
+      return scraped.envelope;
+    }
+
+    // 4. Graceful fallback: use stale cache if we have any.
+    if (cached) {
+      return staleCacheEnvelope(cached.payload, cached.fetchedAt);
+    }
+
+    // 5. No cache, live fetch failed or returned nothing. Return an
+    //    honest unavailable envelope rather than substituting demo
+    //    data. The UI already handles this state — banner + notice.
+    return scraped?.envelope ?? emptySearchResult(
+      "Public Adobe Stock is currently unreachable and no cached results are available.",
+    );
   },
 
   async contributor(query: string) {
     const cfg = readConfig();
     if (!cfg) {
-      // Return a partial-supported state instead of falling all the way
-      // back to fake mock data. The PRD explicitly asks: "If full
-      // contributor data is unavailable, show partial supported state,
-      // not fake data."
       return emptyContributorResult(
         query,
         "Public-metadata source not configured. Set OFFICIAL_PROVIDER_BASE_URL " +
@@ -388,9 +551,9 @@ export const officialAdobeProvider: DataProvider = {
       bestAsset: { id: best.id, title: best.title, downloads: best.downloads },
       contentBreakdown,
       topKeywords,
-      // Monthly trend cannot be reliably reconstructed from public metadata
-      // (uploadDate ≠ download timing). Return an empty array and let the
-      // UI render the partial-support state.
+      // Monthly trend cannot be reliably reconstructed from public
+      // metadata (uploadDate ≠ download timing). Return an empty
+      // array and let the UI render the partial-support state.
       monthlyTrend: [],
       assets,
       dataQuality: "public_metadata",
@@ -404,9 +567,6 @@ export const officialAdobeProvider: DataProvider = {
   },
 
   async heatmap() {
-    // Niche heatmap requires aggregated download data we don't have from
-    // public metadata. Treat as unsupported so runProvider falls back to
-    // the manual provider (when the user has imports) or mock.
     throw new ProviderFeatureUnsupportedError(PROVIDER_ID, "heatmap");
   },
 
@@ -415,13 +575,6 @@ export const officialAdobeProvider: DataProvider = {
   },
 
   async dashboard() {
-    // Public-metadata sources do not expose user-portfolio analytics.
-    // We deliberately RETURN an honestly-labeled empty response (rather
-    // than throw `ProviderFeatureUnsupportedError`) so the UI can show
-    // the `Unavailable` state when the user explicitly chose
-    // `DATA_PROVIDER=official`, instead of silently substituting demo
-    // numbers. The mock and manual providers serve users who haven't
-    // pinned `official`.
     const cfg = readConfig();
     return {
       importedAssets: 0,
@@ -452,17 +605,6 @@ export const officialAdobeProvider: DataProvider = {
   },
 
   async similar(req: ProviderSimilarRequest) {
-    // Public-metadata sources do not expose a verified "similar image"
-    // endpoint, and we will not fake one. Per the PRD: "If official/public
-    // provider does not support similar image search yet, return
-    // Unsupported/Unavailable with a clear notice. Do not fake official
-    // visual search."
-    //
-    // We deliberately RETURN an honestly-labeled empty response (rather
-    // than throw `ProviderFeatureUnsupportedError`) so the UI can show the
-    // "unsupported" state when the user explicitly chose `DATA_PROVIDER=official`,
-    // instead of silently substituting demo results. The mock and manual
-    // providers serve users who haven't pinned `official`.
     return {
       totalResults: 0,
       results: [],
@@ -479,8 +621,7 @@ export const officialAdobeProvider: DataProvider = {
 };
 
 // ---------------------------------------------------------------------------
-// Local helpers (filter + sort) — kept here so a future implementation can
-// optimize them server-side without touching the mock or manual provider.
+// Local helpers (filter + sort + cache envelope helpers).
 // ---------------------------------------------------------------------------
 
 function applyClientFilters(
@@ -508,7 +649,6 @@ function applyClientSort(
           new Date(b.uploadDate).getTime() - new Date(a.uploadDate).getTime(),
       );
     case "most_downloaded":
-      // No-op when downloads are unavailable — we keep server order.
       return out.sort((a, b) => b.downloads - a.downloads);
     case "featured":
       return out.sort((a, b) => Number(b.isPremium) - Number(a.isPremium));
@@ -517,4 +657,31 @@ function applyClientSort(
     default:
       return out;
   }
+}
+
+function staleCacheEnvelope(
+  payload: ProviderSearchResult,
+  fetchedAt: Date,
+): ProviderSearchResult {
+  return {
+    ...payload,
+    providerId: PROVIDER_ID,
+    providerName: PROVIDER_NAME,
+    capabilities: CAPABILITIES,
+    dataQuality: "public_metadata",
+    notice:
+      "Live Adobe Stock fetch failed; showing cached results from " +
+      `${formatAge(fetchedAt)} ago. ` +
+      "No fake numbers are fabricated for the gaps.",
+  };
+}
+
+function formatAge(at: Date): string {
+  const mins = Math.max(0, Math.round((Date.now() - at.getTime()) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
 }

@@ -53,6 +53,12 @@ const LOCAL_SAFE_DEFAULTS = {
   DATA_PROVIDER: "mock",
   MAX_IMPORT_FILE_SIZE_MB: "10",
   USE_LIVE_SCRAPER: "false",
+  // PR #22 public-metadata scraper is OFF by default. Flip to
+  // "true" in your local .env (or set PUBLIC_SCRAPER_ALLOW_PROD
+  // alongside it in prod) when you explicitly want to read public
+  // Adobe Stock pages.
+  PUBLIC_SCRAPER_ENABLED: "false",
+  PUBLIC_SCRAPER_ALLOW_PROD: "false",
 };
 
 /**

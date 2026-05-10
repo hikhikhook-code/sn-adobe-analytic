@@ -644,6 +644,73 @@ enum Plan {
 - **Retry Logic:** 3x retry dengan exponential backoff
 - **Respect robots.txt:** Jangan scrape halaman yang di-disallow
 
+### 10.2.1 Implementation status (PR #22 — Public metadata + cache foundation)
+
+The repo now ships a concrete implementation of §10 that deliberately
+narrows the original aspirational rules to stay inside the project's
+hard safety constraints. Read this subsection alongside §10.1 / §10.2
+— when the two conflict, the PR #22 rules below are authoritative.
+
+**Status: Public metadata provider implemented and cached.**
+
+| §10 rule | PR #22 implementation | Rationale |
+| --- | --- | --- |
+| Public Search Results Page (thumbnail, title, asset ID) | **Implemented** via `src/lib/scraper/public-adobe-stock.ts` (Axios + Cheerio over `https://stock.adobe.com/uk/search?k=…`). Extracts `assetId`, `thumbnailUrl`, `title`, `adobeStockUrl`, `contentType`, `contributorName`/`contributorUrl` (when visible), best-effort `isPremium` / `isAiGenerated`, `keywords`, plus page-level `totalResults`. | Only public HTML, no authentication, identifies itself as SN-Adobe-Analytic. |
+| Asset Detail Page | **Cache foundation only** — `CachedAsset` table + helpers exist; the detail drilldown endpoint is a follow-up. | Keeps PR #22 focused on search metadata; detail-page drilldowns will reuse the same cache path. |
+| Public download count extraction | **Not implemented. Marked Unavailable.** | Public pages don't expose verified download counts. We don't try to approximate a number and label it "real". |
+| Internal Adobe API | **Not used.** | Explicit non-goal. |
+| Contributor Page (`/contributor/{id}`) | **Not scraped.** The provider extracts a visible contributor *name* / href when it appears on the search tile, but the UI routes all contributor clicks through `/uk/search?creator=<name>` (see `adobe-stock-link.ts`). No direct `/contributor/<id>` detail fetch. | Public contributor pages are brittle + often identity-scoped. The keyword-search fallback still gives the user the contributor's portfolio. |
+| Rate Limiting (1 req/s) | **Enforced** — `RATE_LIMIT_MS = 1000` in the scraper. | Matches the PRD. |
+| Cache First | **Enforced** — `readSearchCache` is the first operation; fresh hits skip the live fetch entirely. | |
+| TTL 24h / 7d | **Enforced** — `SEARCH_TTL_MS = 24h`, `ASSET_TTL_MS = 7d`. | Match §10.2. |
+| Retry Logic (3x w/ backoff) | **Narrowed to one retry.** Transient network errors (timeout / ECONNRESET) get one retry with a 1.5s backoff. 4xx / 5xx are never retried — those signal rate-limit or bot challenges, and retrying them is the opposite of respectful. | Conservative against the origin. |
+| Respect robots.txt | **Enforced.** We fetch the same URL shape a browser does (public search page), rate-limited, identified by a single static UA. No disallowed paths are accessed. | |
+| User-Agent Rotation | **NOT implemented. Explicit non-goal.** The scraper sends a single static UA: `SN-Adobe-Analytic/1.0 (+<repo URL>; public metadata only)`. | Rotating UAs to evade detection is an anti-pattern we refuse. |
+| Proxy Rotation | **NOT implemented. Explicit non-goal.** No proxy knob, no code path. | Same rationale. |
+| Anti-bot / captcha bypass | **NOT implemented. Explicit non-goal.** 403 / 429 / 5xx are surfaced as a structured `blocked` status; the provider falls back to cache or returns `Unavailable`. | Same rationale. |
+
+### 10.2.2 Supported vs. unavailable fields (public_metadata)
+
+- **Supported (scraped live):** `assetId`, `thumbnailUrl`, `title`,
+  `adobeStockUrl`, `contentType`, `contributorName`, `contributorUrl`
+  (when visible), `keywords`, `isPremium`, `isAiGenerated`,
+  page-level `totalResults`.
+- **Not available (labeled `Unavailable` — never faked):**
+  `downloads`, `performanceScore`, `downloadsPerMonth`, monthly /
+  seasonal download trends, sales or revenue of any kind.
+
+### 10.2.3 Cache layer
+
+Two Prisma tables, both defined in `prisma/schema.prisma`:
+
+- `CachedSearch` — key: `(source, keyword, sort, contentType, aiFilter, page)`. `payloadJson` carries the exact `ProviderSearchResult`. TTL: 24h.
+- `CachedAsset` — key: `(source, assetId)`. `payloadJson` carries the exact `SearchAsset`. TTL: 7d. Reserved for the asset-detail drilldown.
+
+`source` is `public_scrape` for the built-in Cheerio path or
+`official_api` for the `OFFICIAL_PROVIDER_BASE_URL` HTTP boundary,
+so entries from different upstreams don't clobber each other.
+
+Cache-first read path:
+
+1. Fresh cache hit → return payload.
+2. Stale / missing → attempt live fetch.
+3. Live success → upsert cache → return payload.
+4. Live failure + stale row in cache → return stale with a
+   "live fetch failed; showing cached" notice.
+5. Live failure + no cache → return an honestly empty envelope
+   with a clear reason. UI shows `Unavailable`.
+
+### 10.2.4 Safety limits (hard-coded)
+
+- `RATE_LIMIT_MS = 1000` — 1 request/second minimum interval.
+- `REQUEST_TIMEOUT_MS = 10_000` — 10 second timeout per request.
+- `MAX_RETRIES = 1` — one retry on transient network errors only.
+- Never follows redirects across hosts.
+- Never sends cookies / credentials.
+- `PUBLIC_SCRAPER_ENABLED=false` by default.
+- In `NODE_ENV=production` the scraper stays off unless
+  `PUBLIC_SCRAPER_ALLOW_PROD=true` is ALSO set (double opt-in).
+
 ### 10.3 Performance Score Calculation
 ```typescript
 function calculatePerformanceScore(downloads: number, uploadDate: Date): number {
