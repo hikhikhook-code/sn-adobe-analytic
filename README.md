@@ -87,6 +87,21 @@ niche heat maps, and export results to CSV.
     `Unavailable` (public pages don't expose verified numbers). See
     `docs/PRD-ALIGNMENT.md` §14 for the full spec.
 
+- **PR #23** — Real Data Mode + Demo Mode Restriction:
+  - Mock/demo data is no longer silently substituted for signed-in
+    production users who have no imported data. Instead, they see a clear
+    "No data source configured" empty state with CTAs (Import CSV,
+    Configure public metadata, Try demo mode).
+  - Demo mode is still accessible via the dataset selector ("Demo data")
+    for owners, admins, and any user who wants to explore the interface.
+  - `DataSourceBanner` now shows "Demo mode active" with explicit
+    synthetic-data disclaimer when in demo mode.
+  - Provider fallback to mock is restricted: only allowed for guests,
+    explicit demo scope, or feature-level unsupported errors.
+  - Updated UI copy to remove "demo asset" / "mock data" language from
+    user-facing labels — assets without real URLs now say "No Adobe Stock
+    link available" instead of implying the asset is fake.
+
 - **Phase 3+** (still deferred) — official Adobe signed-feed wiring,
   similar-image search, pricing checkout.
 
@@ -242,9 +257,9 @@ chosen at runtime from `DATA_PROVIDER`:
 
 | Value | Status | What it returns |
 | --- | --- | --- |
-| `mock` *(default)* | Implemented | Synthetic data tagged `demo`. Used everywhere by default. |
-| `official` | **Placeholder** | Throws `ProviderNotImplementedError`. Reserved for a future authoritative Adobe source (official Adobe API or a contributor's own signed export). Tagged `verified` once implemented. |
-| `manual` | **Implemented (Phase 3)** | Reads rows from `ImportedDataset` / `ImportedAsset` for the signed-in user. `selectProvider()` auto-promotes signed-in users with non-archived datasets to this provider — no explicit `DATA_PROVIDER=manual` needed. Tagged `verified`. |
+| `mock` *(default)* | Implemented | Synthetic data tagged `Demo Data`. **PR #23 restriction:** signed-in users only see mock data when they explicitly choose "Demo data" from the dataset selector. Users with no data source see an empty state with CTAs, not silent mock substitution. |
+| `official` / `public` | **Implemented (PR #22)** | Public-metadata provider. Uses the built-in scraper (`PUBLIC_SCRAPER_ENABLED=true`) or an HTTP boundary (`OFFICIAL_PROVIDER_BASE_URL`). Tagged `Public Metadata`. Downloads / performance are `Unavailable`. |
+| `manual` | **Implemented (Phase 3)** | Reads rows from `ImportedDataset` / `ImportedAsset` for the signed-in user. `selectProvider()` auto-promotes signed-in users with non-archived datasets to this provider — no explicit `DATA_PROVIDER=manual` needed. Tagged `Verified`. |
 
 If a non-mock provider throws `ProviderNotImplementedError` at call time, the
 API routes log a warning and gracefully fall back to `mockProvider`, so the UI

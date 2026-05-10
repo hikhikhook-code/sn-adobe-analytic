@@ -1026,3 +1026,93 @@ To start using the public-metadata provider:
 Nothing else changes — the `mock` and `manual` providers keep
 behaving identically. Users on demo or imported data see no
 difference until they switch the env var.
+
+---
+
+## 15. Real Data Mode + Demo Mode Restriction (PR #23)
+
+PR #23 eliminates silent mock-data substitution for signed-in production
+users. Before this change, a user with no imported data and no public-
+metadata provider configured would see synthetic demo numbers throughout
+the app with no clear indication they weren't real Adobe Stock metrics.
+After PR #23, the same user sees an honest "No data source configured"
+empty state with actionable CTAs instead.
+
+### Behavioral changes
+
+| Scenario | Before PR #23 | After PR #23 |
+| --- | --- | --- |
+| Signed-in user, no imports, no public provider, scope ≠ demo | Mock data shown silently (could be confused for real data) | Empty state with CTAs: Import CSV, Configure public metadata, Try demo mode |
+| Signed-in user, no imports, scope = demo (explicit opt-in) | Mock data shown | Mock data shown — clearly labeled "Demo mode active" |
+| Guest / anonymous user | Mock data shown | Mock data shown (unavoidable — no user-scoped data exists) |
+| Signed-in user with imported data | Manual provider (unchanged) | Manual provider (unchanged) |
+| DATA_PROVIDER=official/public configured | Official provider (unchanged) | Official provider (unchanged) |
+| Provider throws ProviderNoDataError | Silently falls back to mock | Surfaces honest empty state (mock fallback blocked) |
+| Provider throws ProviderFeatureUnsupportedError | Falls back to mock for that feature | Falls back to mock for that feature (unchanged — e.g. heatmap on official provider) |
+| Owner/admin in demo mode | Mock data | Mock data — clearly labeled "Demo mode active" |
+
+### Provider fallback rules (updated `runProvider`)
+
+Mock fallback is now allowed ONLY when:
+
+1. **Explicit demo scope** (`datasetScope.kind === "demo"`) — the user
+   deliberately chose "Demo data" from the dataset selector.
+2. **Guest caller** (no `userId`) — there's no user-scoped data to serve.
+3. **Feature-level unsupported** (`ProviderFeatureUnsupportedError`) — the
+   chosen provider doesn't support a specific feature (e.g. heatmap on
+   official), but other features work fine. Mock fills the gap for that
+   feature only.
+
+In all other cases (`ProviderNoDataError`, `ProviderRequiresUserError`),
+`runProvider` re-throws and the API route returns an honest empty envelope
+with `noDataConfigured: true`.
+
+### New UI component: `NoDataState`
+
+`src/components/ui/no-data-state.tsx` — a page-aware empty state card with:
+
+- Contextual title/description per page (search, dashboard, portfolio,
+  heatmap, trending, similar)
+- Three CTAs: Import your CSV, Configure public metadata, Try demo mode
+- Footer hints explaining what each data source provides
+- Integrated in `/search` and `/dashboard` pages when the API returns
+  `noDataConfigured: true`
+
+### DataSourceBanner updates
+
+| State | Old label | New label |
+| --- | --- | --- |
+| No imports, no provider | "No imported data yet — Showing mock / demo metrics…" | "No data source configured — Import a CSV…, configure…, or switch to demo mode…" |
+| Explicit demo mode | "Using demo data" | "Demo mode active — Showing synthetic metrics…" |
+
+### UI copy improvements
+
+- "Demo asset — no real Adobe URL" → "No Adobe Stock link available"
+- "This is demo / mock data with no real Adobe Stock URL…" → "No verified Adobe Stock URL available for this asset…"
+- "No contributor info available for this demo asset" → "No contributor info available for this asset"
+
+### Production data sources (order of preference)
+
+1. **User Imported CSV** (`DATA_PROVIDER=manual` or auto-promoted) — tagged `Verified`
+2. **Public Metadata Provider** (`DATA_PROVIDER=official` or `public`) — tagged `Public Metadata`
+3. **Demo Mode** (explicit opt-in via dataset selector) — tagged `Demo Data`
+
+Mock/demo is NOT a production data source. It is a development tool and
+an explicit opt-in exploration mode.
+
+### What this PR does NOT change
+
+- The `mock` provider itself still works identically (for dev, tests, and
+  explicit demo mode).
+- Guests still see mock data (no alternative exists for anonymous users).
+- `DATA_PROVIDER=mock` env var still works for development environments.
+- No private Adobe APIs, proxy rotation, UA evasion, or anti-bot bypass.
+- No fake download counts or performance scores.
+- Existing import + export + saved + auth flows unchanged.
+
+### Unavailable metrics remain unavailable
+
+The hard constraint is preserved: if a data source cannot provide verified
+download counts, performance scores, or sales figures, those fields render
+as `Unavailable` (or `—`) in the UI. They are NEVER filled with fake zeros
+or synthetic numbers unless the user is explicitly in demo mode.

@@ -21,6 +21,7 @@ import { useRecentSearches } from "@/hooks/use-recent-searches";
 import { useFavorites } from "@/hooks/use-favorites";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataSourceBanner } from "@/components/layout/data-source-banner";
+import { NoDataState } from "@/components/ui/no-data-state";
 import { useActiveDataset } from "@/hooks/use-active-dataset";
 import type { DatasetScope, DatasetScopeInfo } from "@/lib/dataset-scope";
 import type {
@@ -44,6 +45,9 @@ interface SearchResponseWithScope extends SearchResponse {
   hasAnyDatasets?: boolean;
   capabilities?: ProviderCapabilities;
   notice?: string;
+  /** PR #23: true when no real data source is configured and the response
+   *  is an honest empty envelope rather than silently-substituted mock. */
+  noDataConfigured?: boolean;
 }
 
 interface SimilarResponseWithScope extends SimilarSearchResponse {
@@ -934,7 +938,9 @@ function SearchPageInner() {
               exporting={exporting}
             />
 
-            {data.results.length === 0 ? (
+            {data.noDataConfigured ? (
+              <NoDataState page="search" showDemoOption />
+            ) : data.results.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-border bg-card p-10 text-center">
                 <p className="text-sm font-medium">
                   No results for <span className="text-foreground">{keyword}</span>

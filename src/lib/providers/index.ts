@@ -38,22 +38,41 @@ let warnedAboutLiveScraper = false;
 const warnedAboutMissingProvider: Record<string, boolean> = {};
 
 /**
+ * Returns true if the context indicates the user explicitly opted into
+ * demo mode (via the dataset-scope selector). When true, mock fallback
+ * is permitted even in production.
+ */
+function isExplicitDemoScope(ctx?: ProviderContext): boolean {
+  return ctx?.datasetScope?.kind === "demo";
+}
+
+/**
  * Resolve the current data provider from env + (optionally) user.
  *
- * Selection order:
- * 1. `DATA_PROVIDER` env var (`mock` | `official` | `manual`); unknown value
- *    → mock with a warning.
- * 2. **Auto-promote to manual** when:
+ * Selection order (PR #23 — real-data-first):
+ *
+ * 1. Explicit demo scope (`datasetScope.kind === "demo"`) → mockProvider.
+ *    This is the ONLY path that returns mock for a signed-in production
+ *    user. Guests (no userId) also get mock as there's nothing else to
+ *    serve.
+ *
+ * 2. `DATA_PROVIDER` env var (`mock` | `official` | `public` | `manual`);
+ *    unknown value → mock with a warning.
+ *
+ * 3. **Auto-promote to manual** when:
  *    - the env var is `mock` (or unset), AND
  *    - the caller passed a `userId`, AND
- *    - that user has at least one non-archived imported dataset
- *    This makes the manual provider feel zero-config: as soon as a user
- *    imports their own data, they start seeing it.
- * 3. Default → mock.
+ *    - the scope is `specific` or `all` (already verified), OR the user
+ *      has at least one non-archived imported dataset.
+ *    This makes the manual provider feel zero-config.
  *
- * `USE_LIVE_SCRAPER` is honored ONLY in development. In production it is
- * forced off — we will not silently scrape Adobe Stock from a deployed
- * instance.
+ * 4. When DATA_PROVIDER=mock AND the user has no data AND the scope is
+ *    NOT explicitly demo → return mockProvider but mark context as
+ *    "no_real_data" so runProvider can tag the envelope with a notice
+ *    instead of silently showing demo numbers as if they were real.
+ *
+ * 5. Guests (no userId, no explicit demo) → mockProvider (unavoidable;
+ *    there's no user-scoped data to serve).
  */
 export async function selectProvider(
   ctx?: ProviderContext,
@@ -94,7 +113,7 @@ export async function selectProvider(
   // Explicit demo scope bypasses auto-promotion. A signed-in user who has
   // imported data but deliberately chose "Using demo data" must actually
   // see demo data.
-  if (ctx?.datasetScope?.kind === "demo") {
+  if (isExplicitDemoScope(ctx)) {
     return mockProvider;
   }
 
@@ -130,9 +149,7 @@ export async function selectProvider(
 }
 
 /**
- * Errors that mean "this provider can't fulfill the request right now,
- * fall back to mock". Keep the list tight — anything else is a bug and
- * should bubble up.
+ * Errors that mean "this provider can't fulfill the request right now".
  */
 function isFallbackableError(err: unknown): boolean {
   return (
@@ -162,9 +179,20 @@ function stampEnvelope<T extends ProviderResultEnvelope>(
 }
 
 /**
- * Convenience wrapper: call a provider method and gracefully fall back to
- * `mockProvider` if the chosen provider can't fulfill the request (not
- * implemented, requires user, or user has no data yet).
+ * Convenience wrapper: call a provider method and handle fallback.
+ *
+ * PR #23 behavioral change: mock fallback is only allowed when:
+ *   - The user explicitly opted into demo mode (datasetScope.kind === "demo"), OR
+ *   - The caller is a guest (no userId — nothing else to serve), OR
+ *   - The error is a `ProviderFeatureUnsupportedError` (e.g. official
+ *     provider doesn't support heatmap — falling back to mock for that
+ *     specific feature is acceptable since the user's "real data" for
+ *     that feature simply doesn't exist anywhere).
+ *
+ * When fallback is NOT allowed (signed-in user, non-demo scope, error is
+ * ProviderNoData or ProviderRequiresUser), we re-throw so the API route
+ * can surface an honest empty state rather than silently showing synthetic
+ * demo numbers the user might mistake for real Adobe data.
  */
 export async function runProvider<T extends ProviderResultEnvelope>(
   ctx: ProviderContext | undefined,
@@ -176,11 +204,27 @@ export async function runProvider<T extends ProviderResultEnvelope>(
     return stampEnvelope(provider, out);
   } catch (err) {
     if (isFallbackableError(err)) {
+      // Determine if mock fallback is permitted.
+      const allowMockFallback =
+        isExplicitDemoScope(ctx) ||
+        !ctx?.userId ||
+        err instanceof ProviderFeatureUnsupportedError;
+
+      if (allowMockFallback) {
+        console.warn(
+          `[providers] ${(err as Error).message} — falling back to mock.`,
+        );
+        const out = await fn(mockProvider);
+        return stampEnvelope(mockProvider, out);
+      }
+
+      // For signed-in users NOT in demo mode: do NOT silently substitute
+      // mock data. Re-throw so the API layer returns an honest "no data"
+      // response the UI can render as a clean empty state with CTAs.
       console.warn(
-        `[providers] ${(err as Error).message}`,
+        `[providers] ${(err as Error).message} — NOT falling back to mock (user is signed in, scope is not demo).`,
       );
-      const out = await fn(mockProvider);
-      return stampEnvelope(mockProvider, out);
+      throw err;
     }
     throw err;
   }

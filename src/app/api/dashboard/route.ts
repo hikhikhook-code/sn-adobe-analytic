@@ -4,6 +4,10 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { resolveDatasetScope, scopedDatasetIds } from "@/lib/dataset-scope";
 import { runDashboard } from "@/lib/providers";
+import {
+  ProviderNoDataError,
+  ProviderRequiresUserError,
+} from "@/lib/providers/types";
 import { parseJsonArray } from "@/lib/utils";
 
 /**
@@ -92,6 +96,46 @@ export async function GET() {
 
   const ctx = { userId, datasetScope: scopeInfo.scope };
 
+  // PR #23: runDashboard may throw ProviderNoDataError for signed-in
+  // users with no imported data (and not in demo mode). We catch that
+  // and produce an honest empty analytics envelope rather than silently
+  // substituting mock data.
+  let analytics;
+  try {
+    analytics = await runDashboard(ctx);
+  } catch (err) {
+    if (
+      err instanceof ProviderNoDataError ||
+      err instanceof ProviderRequiresUserError
+    ) {
+      analytics = {
+        importedAssets: 0,
+        importedAssetsAvailable: false,
+        totalDownloads: 0,
+        totalDownloadsAvailable: false,
+        averagePerformanceScore: 0,
+        averagePerformanceScoreAvailable: false,
+        contentBreakdown: [],
+        contentBreakdownAvailable: false,
+        topPerformers: [],
+        topPerformersAvailable: false,
+        keywordHighlights: [],
+        keywordHighlightsAvailable: false,
+        trendingKeywords: [],
+        trendingKeywordsAvailable: false,
+        dataQuality: "demo" as const,
+        providerName: "No data source",
+        providerId: "none",
+        capabilities: null,
+        notice:
+          "No data source is configured. Import a CSV, configure the public metadata provider, or switch to demo mode.",
+        noDataConfigured: true,
+      };
+    } else {
+      throw err;
+    }
+  }
+
   const [
     searchesToday,
     savedAssets,
@@ -99,7 +143,6 @@ export async function GET() {
     trackedContributors,
     recentSearches,
     savedAssetsPreviewRows,
-    analytics,
   ] = await Promise.all([
     prisma.searchHistory.count({
       where: { userId, createdAt: { gte: startOfToday } },
@@ -151,7 +194,6 @@ export async function GET() {
         lastCheckedProviderId: true,
       },
     }),
-    runDashboard(ctx),
   ]);
 
   // Saved-asset preview is "what the user saved", not "what the active
