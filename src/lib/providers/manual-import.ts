@@ -13,6 +13,7 @@ import {
 } from "./types";
 import type {
   DataProvider,
+  ProviderCapabilities,
   ProviderContributorResult,
   ProviderHeatmapResult,
   ProviderSearchRequest,
@@ -22,6 +23,21 @@ import type {
 
 const PROVIDER_ID = "manual";
 const PROVIDER_NAME = "User imported data";
+
+const CAPABILITIES: ProviderCapabilities = {
+  search: "supported",
+  contributor: "supported",
+  heatmap: "supported",
+  trending: "supported",
+  // Manual provider has no per-asset reverse-image index (the user just
+  // uploaded a CSV). UI surfaces "Coming Soon" until a future PR wires up
+  // perceptual hashing or a remote similar-image API.
+  similarImage: "unsupported",
+  // The user uploaded these numbers themselves — we trust them as
+  // verified-from-import. The UI still shows the data-quality badge so
+  // the source is always visible.
+  downloadsAvailable: true,
+};
 
 interface ImportedAssetRow {
   id: string;
@@ -93,6 +109,9 @@ function toSearchAsset(row: ImportedAssetRow): SearchAsset {
     isAiGenerated: row.isAiGenerated,
     keywords: parseJsonArray(row.keywordsJson),
     adobeStockUrl: row.adobeStockUrl || "",
+    // The user uploaded these numbers; treat them as available even if they
+    // happen to be zero.
+    metricsAvailable: row.downloads != null,
   };
 }
 
@@ -207,6 +226,7 @@ export const manualImportProvider: DataProvider = {
   id: PROVIDER_ID,
   name: PROVIDER_NAME,
   dataQuality: "verified",
+  capabilities: CAPABILITIES,
 
   async search(req, ctx) {
     if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
@@ -226,6 +246,8 @@ export const manualImportProvider: DataProvider = {
       contentBreakdown: contentBreakdown(sorted),
       results: paged,
       dataQuality: "verified",
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
       providerName: PROVIDER_NAME,
     } satisfies ProviderSearchResult;
   },
@@ -306,6 +328,8 @@ export const manualImportProvider: DataProvider = {
       monthlyTrend,
       assets: filtered,
       dataQuality: "verified",
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
       providerName: PROVIDER_NAME,
     } satisfies ProviderContributorResult;
   },
@@ -371,6 +395,8 @@ export const manualImportProvider: DataProvider = {
     return {
       niches,
       dataQuality: "verified",
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
       providerName: PROVIDER_NAME,
     } satisfies ProviderHeatmapResult;
   },
@@ -420,6 +446,8 @@ export const manualImportProvider: DataProvider = {
     return {
       trending,
       dataQuality: "verified",
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
       providerName: PROVIDER_NAME,
     } satisfies ProviderTrendingResult;
   },

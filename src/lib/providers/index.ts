@@ -3,6 +3,7 @@ import { mockProvider } from "./mock";
 import { officialAdobeProvider } from "./official-adobe";
 import { manualImportProvider } from "./manual-import";
 import {
+  ProviderFeatureUnsupportedError,
   ProviderNoDataError,
   ProviderNotImplementedError,
   ProviderRequiresUserError,
@@ -12,6 +13,7 @@ import type {
   ProviderContext,
   ProviderContributorResult,
   ProviderHeatmapResult,
+  ProviderResultEnvelope,
   ProviderSearchRequest,
   ProviderSearchResult,
   ProviderTrendingResult,
@@ -119,25 +121,57 @@ export async function selectProvider(
 }
 
 /**
+ * Errors that mean "this provider can't fulfill the request right now,
+ * fall back to mock". Keep the list tight — anything else is a bug and
+ * should bubble up.
+ */
+function isFallbackableError(err: unknown): boolean {
+  return (
+    err instanceof ProviderNotImplementedError ||
+    err instanceof ProviderRequiresUserError ||
+    err instanceof ProviderNoDataError ||
+    err instanceof ProviderFeatureUnsupportedError
+  );
+}
+
+/**
+ * Stamp providerId + capabilities + dataQuality on a result envelope so
+ * downstream code (UI, exports) can rely on them being present even if a
+ * provider implementation forgets to fill them in.
+ */
+function stampEnvelope<T extends ProviderResultEnvelope>(
+  provider: DataProvider,
+  result: T,
+): T {
+  return {
+    ...result,
+    providerId: result.providerId ?? provider.id,
+    providerName: result.providerName ?? provider.name,
+    dataQuality: result.dataQuality ?? provider.dataQuality,
+    capabilities: result.capabilities ?? provider.capabilities,
+  };
+}
+
+/**
  * Convenience wrapper: call a provider method and gracefully fall back to
  * `mockProvider` if the chosen provider can't fulfill the request (not
  * implemented, requires user, or user has no data yet).
  */
-export async function runProvider<T>(
+export async function runProvider<T extends ProviderResultEnvelope>(
   ctx: ProviderContext | undefined,
   fn: (p: DataProvider) => Promise<T>,
 ): Promise<T> {
   const provider = await selectProvider(ctx);
   try {
-    return await fn(provider);
+    const out = await fn(provider);
+    return stampEnvelope(provider, out);
   } catch (err) {
-    if (
-      err instanceof ProviderNotImplementedError ||
-      err instanceof ProviderRequiresUserError ||
-      err instanceof ProviderNoDataError
-    ) {
-      console.warn(`[providers] ${err.message}`);
-      return fn(mockProvider);
+    if (isFallbackableError(err)) {
+      console.warn(
+        `[providers] ${(err as Error).message}`,
+      );
+      const out = await fn(mockProvider);
+      return stampEnvelope(mockProvider, out);
     }
     throw err;
   }
@@ -175,7 +209,9 @@ export { mockProvider, officialAdobeProvider, manualImportProvider };
 export type {
   DataProvider,
   DataQuality,
+  ProviderCapabilities,
   ProviderContext,
+  ProviderFeatureSupport,
   ProviderSearchRequest,
   ProviderSearchResult,
   ProviderContributorResult,

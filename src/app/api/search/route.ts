@@ -85,11 +85,16 @@ export async function POST(req: Request) {
     pageSize: result.results.length,
     dataQuality: result.dataQuality,
     providerName: result.providerName,
+    providerId: result.providerId,
     // Echo the scope back so the search page can render the right banner
     // without making a separate /api/user/active-dataset call.
     datasetScope: scopeInfo.scope,
     datasetName: scopeInfo.datasetName ?? null,
     scopeReason: scopeInfo.reason,
     hasAnyDatasets: scopeInfo.hasAnyDatasets,
+    // Provider capabilities + per-call notice. Drive "Coming Soon" /
+    // "Provider not configured" UI without a second round-trip.
+    capabilities: result.capabilities,
+    notice: result.notice,
   });
 }
