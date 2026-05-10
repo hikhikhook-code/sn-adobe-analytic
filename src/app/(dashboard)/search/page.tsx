@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, Suspense } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Bookmark, Check } from "lucide-react";
 import { TopBar } from "@/components/layout/topbar";
 import { SearchBar } from "@/components/search/search-bar";
 import { SearchFilters } from "@/components/search/search-filters";
@@ -10,6 +12,7 @@ import { ResultsToolbar } from "@/components/search/results-toolbar";
 import { ResultCard } from "@/components/search/result-card";
 import { Pagination } from "@/components/search/pagination";
 import { RecentSearches } from "@/components/search/recent-searches";
+import { Button } from "@/components/ui/button";
 import {
   SimilarImageSearch,
   type SimilarImageQuery,
@@ -55,11 +58,19 @@ function SearchPageInner() {
   const router = useRouter();
   const sp = useSearchParams();
   const initialQ = sp.get("q") ?? "";
+  // Saved searches bring their filter set back via URL params — honor
+  // whatever is there on first render so "Re-run" from /saved lands on
+  // the exact same query the user pinned. Unknown values fall back to
+  // defaults because the caller's list is constrained by Zod on POST.
+  const initialSort = (sp.get("sort") as SortMode | null) ?? "relevance";
+  const initialContentType =
+    (sp.get("contentType") as ContentType | null) ?? "all";
+  const initialAiFilter = (sp.get("aiFilter") as AiFilter | null) ?? "all";
 
   const [keyword, setKeyword] = useState(initialQ);
-  const [sort, setSort] = useState<SortMode>("relevance");
-  const [contentType, setContentType] = useState<ContentType>("all");
-  const [aiFilter, setAiFilter] = useState<AiFilter>("all");
+  const [sort, setSort] = useState<SortMode>(initialSort);
+  const [contentType, setContentType] = useState<ContentType>(initialContentType);
+  const [aiFilter, setAiFilter] = useState<AiFilter>(initialAiFilter);
   const [page, setPage] = useState(1);
   const [data, setData] = useState<SearchResponseWithScope | null>(null);
   const [loading, setLoading] = useState(false);
@@ -67,6 +78,14 @@ function SearchPageInner() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toolbarSort, setToolbarSort] = useState<"default" | "downloads" | "performance">("default");
   const [exporting, setExporting] = useState(false);
+  // "Save this search" UI state. `saveStatus` toggles between idle, saving,
+  // and a brief "saved" confirmation banner. We deliberately avoid a
+  // modal — the button POSTs with the current filters and surfaces a
+  // link to /saved inline so the user can keep searching.
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Similar Image Search panel state — separate from keyword search so
   // the user can flip between the two flows without losing either's data.
@@ -230,6 +249,63 @@ function SearchPageInner() {
       setExporting(false);
     }
   }, [data, keyword, selected, sort, contentType, aiFilter]);
+
+  /**
+   * Save the current keyword + filters as a pinned `SavedSearch`. The
+   * server snapshots the active provider + data-quality + dataset scope
+   * at this moment so the saved row stays honest even if the user later
+   * switches provider or archives the underlying dataset.
+   *
+   * We use the resolved scope from the most recent search response
+   * (`data.datasetScope`) rather than the selector's live state so the
+   * saved row matches what's actually on screen — the two can diverge
+   * briefly while the selector change is being applied.
+   */
+  const handleSaveSearch = useCallback(async () => {
+    if (!keyword || !data) return;
+    setSaveStatus("saving");
+    setSaveError(null);
+    try {
+      const res = await fetch("/api/saved-searches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keyword,
+          sort,
+          contentType,
+          aiFilter,
+          resultCount: data.totalResults,
+          dataQuality: data.dataQuality,
+          providerName: data.providerName,
+          providerId: data.providerId,
+          datasetScope: data.datasetScope,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        // Signed-out users get a 401 — surface a helpful next step rather
+        // than a generic error string.
+        if (res.status === 401) {
+          setSaveError("Sign in to save searches to your account.");
+        } else {
+          setSaveError(body.error ?? `Save failed (${res.status})`);
+        }
+        setSaveStatus("error");
+        return;
+      }
+      setSaveStatus("saved");
+      // Fade the "Saved" banner after a short delay so repeat saves
+      // still feel responsive.
+      setTimeout(() => {
+        setSaveStatus((s) => (s === "saved" ? "idle" : s));
+      }, 4000);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Save failed");
+      setSaveStatus("error");
+    }
+  }, [keyword, data, sort, contentType, aiFilter]);
 
   const runSimilar = useCallback(
     async (q: SimilarImageQuery) => {
@@ -549,6 +625,56 @@ function SearchPageInner() {
               contentBreakdown={data.contentBreakdown}
               dataQuality={data.dataQuality}
             />
+
+            {/* Save-this-search affordance. Sits between the summary and
+                the toolbar so it's adjacent to the results the user is
+                about to decide are worth pinning. Uses plain HTML `<a>`
+                rather than next/link for `/saved` navigation because
+                there's nothing to prefetch — the success banner shows
+                a link to /saved once the save completes. */}
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/60 bg-card px-4 py-3 text-sm">
+              <div className="flex items-start gap-2 text-muted-foreground">
+                <Bookmark className="mt-0.5 h-4 w-4 flex-none text-accent-blue" />
+                <span>
+                  Save this keyword + filter set for quick re-run later.
+                  <span className="block text-[11px] text-muted-foreground/80">
+                    Provider and data-quality are snapshotted at save time.
+                  </span>
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {saveStatus === "saved" ? (
+                  <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-800">
+                    <Check className="h-3 w-3" />
+                    Saved.{" "}
+                    <Link
+                      href="/saved"
+                      className="underline underline-offset-2"
+                    >
+                      View in Saved
+                    </Link>
+                  </span>
+                ) : null}
+                {saveStatus === "error" && saveError ? (
+                  <span className="text-xs text-rose-700">{saveError}</span>
+                ) : null}
+                <Button
+                  type="button"
+                  variant={saveStatus === "saved" ? "outline" : "accent"}
+                  size="sm"
+                  onClick={handleSaveSearch}
+                  disabled={saveStatus === "saving"}
+                  aria-label="Save this search"
+                >
+                  <Bookmark className="h-3.5 w-3.5" />
+                  {saveStatus === "saving"
+                    ? "Saving…"
+                    : saveStatus === "saved"
+                      ? "Save again"
+                      : "Save this search"}
+                </Button>
+              </div>
+            </div>
 
             <ResultsToolbar
               total={data.results.length}

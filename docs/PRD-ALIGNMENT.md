@@ -111,8 +111,10 @@ Status legend:
 | 5.5 | **Similar Image Search** | **Implemented** (mock + manual, metadata proxy) / **Unsupported** (official) | `/search` shows a "Search by image" panel (toggle in the search bar) that accepts an image upload, an image URL, or a free-text hint. POST `/api/search/similar` runs the chosen provider and returns the same result shape as keyword search, plus a `similarityScore` (0–100) and a per-row `similarityAvailable` flag. Mock provider returns demo similar-image results ranked by token overlap (`Demo Data` envelope). Manual provider ranks the user's imported assets by metadata-similarity proxy — title-token Jaccard, keyword overlap, category/content-type match, plus a 100-point boost when the URL exactly matches `adobeStockUrl`/`thumbnailUrl`. Manual responses are tagged `Estimated`, never `Verified`, because the *ranking* is a metadata heuristic — not real visual AI. Official provider returns an empty result with a clear notice ("not available from this public-metadata source") — no scraping, no internal Adobe APIs, no proxy rotation. Result cards reuse the existing UI (favorites work; selection works) plus a Similarity tile. CSV export sends `type = "similar"` to `/api/export`, which adds a `Similarity Score` column and records an export-history row. |
 | 5.5 | Similar Image Search — Find similar from a card | **Implemented** | Every keyword-search result card now has an active "Find similar" button (replaces the previous "Coming Soon" stub). Clicking it opens the Similar Image Search panel, seeds the URL field with the asset's Adobe Stock URL (or thumbnail), and runs the metadata-similarity ranking. |
 | 5.6 | **Export CSV** | **Implemented** | `/export` route + history page. CSV columns match PRD §5.6. Each export row records the active dataset scope. Similar Image Search exports use `type = "similar"` and add a leading `Similarity Score` column; cells render `Unavailable` when `similarityAvailable: false`. |
-| 5.7 | **Saved / Favorites** | **Implemented** | Heart button on result cards; `/saved` page lists favorites. |
-| 5.7 | Saved searches + Folders/collections + Track delta since save | **Pending** | Only individual-asset favorites are persisted; saved-search and collection grouping not yet implemented. |
+| 5.7 | **Saved / Favorites** | **Implemented** | Heart button on result cards persists to `Favorite`; `/saved` page renders a grid + table across two tabs (Saved assets / Saved searches) with a collection sidebar. |
+| 5.7 | Saved searches | **Implemented** (mock + manual) / **Partial** (official) | Explicit "Save this search" button on `/search` persists keyword + filter set to `SavedSearch` with a provider + data-quality + dataset-scope snapshot at save time. `/saved` table re-runs each pinned search back to `/search?q=&sort=&contentType=&aiFilter=` so the filter restore is lossless. |
+| 5.7 | Collections / folders | **Implemented** | `Collection` model; create / rename / delete from the `/saved` sidebar. Assign any favorite or saved-search row via a per-row picker; deleting a collection falls its contents back to Uncategorized (never cascades). Names are unique per-user (case-insensitive). |
+| 5.7 | Track delta since save | **Implemented (manual)** / **Unavailable (mock, official)** | `Favorite.downloads` / `performanceScore` are snapshotted at save time and never overwritten. `/api/saved/track` refreshes a "current" figure by looking each saved asset up by `externalId` in the active dataset scope — verified from import when found; honestly `Unavailable` otherwise. Mock and official providers cannot supply a live current number, and we never fabricate one. Per-row `lastChecked*` columns persist the most recent refresh so the delta card survives reloads. |
 | 5.8 | **Trending keywords** | **Implemented** (mock + manual) / **Unsupported → falls back** (official) | Manual aggregates per-keyword volume + period-over-period growth from imported assets. Mock provides canned demo trending tagged `Demo Data`. Official explicitly throws `ProviderFeatureUnsupportedError` and `runProvider` falls back to manual / mock. |
 | 5.8 | Trending filters — period, content type, minimum volume, sort | **Implemented** (mock + manual) | All four filters affect provider aggregation, not just the displayed list. `/api/search/trending?period=&contentType=&minVolume=&sort=&limit=` is normalized server-side via `parseTrendingFilters`. Manual provider applies content-type to the underlying asset set before grouping; both providers honor `minVolume` and respect the active dataset selector scope. |
 | 5.8 | **Rising niches** | **Implemented** (mock + manual) | Manual derives rising niches from keywords with positive period-over-period growth (≥ 2 assets, ≥ minimum volume). Mock surfaces heat-map niches with `trend === "up"`, ranked by synthesized growth. Both tag the matching `Demo Data` / `Verified` quality badge per row. |
@@ -454,3 +456,111 @@ honest `Unavailable` state via `UnavailableCardState`.
 - Any scraping / proxy rotation / anti-bot bypass / fabricated Adobe
   download counts — forbidden by the PRD's hard constraints.
 
+
+
+
+---
+
+## 10. Saved / Favorites — status by capability (PR #15)
+
+PR #15 completes the Saved/Favorites system against PRD §5.7. The
+`/saved` page now owns three concerns: pinned assets, pinned searches,
+and user-defined collections. Track-changes is a first-class feature
+with honest per-provider semantics.
+
+### Data model additions
+
+- `Favorite.collectionId` (SetNull on Collection delete), `Favorite.notes`.
+- `Favorite.lastCheckedAt`, `lastCheckedDownloads`,
+  `lastCheckedPerformanceScore`, `lastCheckedDataQuality`,
+  `lastCheckedProviderId` — snapshot of the most recent
+  `/api/saved/track` refresh.
+- New `Collection` model (`userId + name` unique, case-insensitive dedupe
+  at the API layer). Holds both favorites and saved searches.
+- New `SavedSearch` model — keyword + filter set, plus a provider +
+  data-quality + dataset-scope snapshot at save time. Dataset scope is
+  stored as the same string tag (`all_datasets` / `selected_dataset` /
+  `demo_data`) used by `ExportHistory` so archived / renamed datasets
+  don't break the saved row.
+
+### API surface
+
+- `GET/POST /api/favorites` — list + upsert. POST preserves the saved-at
+  snapshot on re-save (downloads / performanceScore never overwritten).
+- `PATCH /api/favorites` — move an asset between collections / edit its
+  notes without unsaving.
+- `DELETE /api/favorites?assetId=…` — unsave (existing behavior
+  preserved).
+- `GET/POST /api/collections`, `PATCH/DELETE /api/collections/[id]` —
+  full CRUD with user-scoped ownership checks on every mutation.
+- `GET/POST /api/saved-searches`,
+  `PATCH/DELETE /api/saved-searches/[id]` — full CRUD. PATCH allows
+  renaming / moving / editing notes but NOT editing the stored filter
+  set; users delete + re-save to change the query so we never silently
+  drift from what they pinned.
+- `POST /api/saved/track` — refresh the "current" downloads /
+  performance figure for up to 200 saved assets. Always returns a row
+  per input favorite with `available: true/false` and persists the
+  result on the `Favorite` row.
+- `POST /api/saved/export[?collectionId=…]` — 3-section CSV (meta +
+  saved_asset + saved_search). Records an `ExportHistory` row with
+  `type = "saved"`. Unavailable cells (no track-changes data, or
+  provider unsupported) render `Unavailable` rather than `0`.
+
+### Per-provider track-changes matrix
+
+| Capability | mock (Demo) | manual (Verified) | official configured (Public Metadata) | official unset |
+| --- | --- | --- | --- | --- |
+| Current downloads | **Unavailable** (synthesized per-query, no stable source) | **Verified** when the saved asset's `externalId` matches a scoped `ImportedAsset` | **Unavailable** (public pages do not expose verified downloads) | **Unavailable** + "not configured" notice |
+| Current performance score | **Unavailable** | **Verified** when imported row includes it; otherwise derived via `calculatePerformanceScore` and surfaced as `Estimated` | **Unavailable** | **Unavailable** |
+| Delta downloads / performance | **Unavailable** | Computed from saved-at snapshot | **Unavailable** | **Unavailable** |
+| Last-checked timestamp | persisted on every call so "last checked N ago" works regardless of availability | persisted | persisted | persisted |
+
+**Hard rule preserved.** The `/api/saved/track` endpoint does NOT fall
+through to mock when the manual provider can't find a match — users
+explicitly chose to pin a specific row; faking a refreshed number would
+undo the promise of the `Verified` badge. Users see a truthful
+"Unavailable — import a CSV to enable" banner instead.
+
+### `/saved` UI
+
+- Left rail: collection sidebar with "All saved", "Uncategorized", and
+  every custom folder. Inline create / rename / delete.
+- Main pane: tab switcher between Saved Assets (card grid with
+  thumbnail, contributor, delta chips, collection picker, data-quality
+  badge) and Saved Searches (table with keyword, filter badges,
+  provider + quality snapshot, collection picker, one-click Re-run).
+- Toolbar: "Check for updates" (calls `/api/saved/track`),
+  "Export CSV" (honors active collection filter), "Find more"
+  (`/search`).
+- Empty states are distinct per-filter: "No saved assets yet" with a
+  CTA to `/search` vs "No assets in this collection" with a hint to
+  move existing items.
+
+### `/search` UI
+
+- "Save this search" button lives between `ResultsSummary` and
+  `ResultsToolbar`. Posts the current keyword + filters + resolved
+  dataset scope to `/api/saved-searches`. Guests get a helpful "Sign in
+  to save searches to your account" message rather than a generic 401.
+- URL-param restore: `/search?q=&sort=&contentType=&aiFilter=` now
+  populates filter state on first render, so `/saved` Re-run is
+  lossless.
+
+### `/dashboard` UI
+
+- `savedAssetsPreview` now uses each favorite's own
+  `lastCheckedDataQuality` when populated, falling back to the active
+  provider's envelope quality. A manual-imported refreshed row stays
+  `Verified` in the preview even if the user later switches back to
+  mock.
+
+### What's explicitly NOT in PR #15
+
+- Live provider polling / background refresh. `/api/saved/track` is
+  request-driven only — no cron, no websockets, no provider pings.
+- Any form of Adobe scraping, proxy rotation, or anti-bot bypass.
+- Supabase migration, Pricing / SaaS gating, Auth completion — all
+  deferred per the PRD brief.
+- Notifications for track-changes deltas (email, in-app). The UI shows
+  the delta chip; the user decides what to do with it.
