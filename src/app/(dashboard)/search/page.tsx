@@ -55,6 +55,43 @@ interface SimilarResponseWithScope extends SimilarSearchResponse {
 }
 
 /**
+ * Module-level guard for the initial-URL search effect.
+ *
+ * React 18 Strict Mode mounts this component, unmounts it, and mounts
+ * it again — on purpose — the first time the user navigates to
+ * `/search?q=<keyword>`. Component-level refs (`didMountRef`,
+ * `lastSignatureRef`) are recreated by the second mount, so the
+ * mount-only URL effect re-fires and the browser sends a second POST
+ * to `/api/search`. The server's SearchHistory insert for the first
+ * POST had already happened by the time the second one lands, so
+ * client-side aborting doesn't help — we'd still see `Searches Today`
+ * increment by +2 and two `SearchHistory` rows for one user action.
+ *
+ * This ref lives at module scope, so it survives the Strict-Mode
+ * unmount/remount cycle and blocks the duplicate fetch client-side
+ * before the request is even issued. The dedup signature includes
+ * the full query + filter set so two genuinely different initial
+ * URLs (`?q=a`, `?q=b`) both get a chance to run exactly once.
+ *
+ * The entry carries a timestamp so navigating away and coming back
+ * (e.g. client-side navigation Home → Search → Home → Search) after
+ * the window has elapsed still re-runs the search and the user sees
+ * fresh data. The window matches the server-side dedup TTL so the
+ * two layers stay in sync: within the window the server skips the
+ * duplicate write, outside it the server counts a fresh search (and
+ * the client happily issues one).
+ *
+ * Server-side there's a second layer of defense in
+ * `src/lib/search-dedup.ts` keyed off the same tuple — the client
+ * guard is the first line so we don't even send the duplicate
+ * request, the server guard catches the edge cases (page refresh,
+ * back-forward, new-tab-same-URL) that a module-level client ref
+ * can't see.
+ */
+const INITIAL_URL_GUARD_TTL_MS = 30_000;
+let LAST_INITIAL_URL_SEARCH: { sig: string; at: number } | null = null;
+
+/**
  * Friendly rate-limit banner state shown when /api/search returns 429.
  * PR #20 QA fix: the previous build surfaced the raw HTTP error
  * ("Search failed (429)") with no context. The server already returns
@@ -236,23 +273,45 @@ function SearchPageInner() {
    * PR #20: single mount-once effect replaces the old `[initialQ]` effect
    * that fired every time the URL changed. `handleSubmit` now drives all
    * subsequent searches directly, so the URL effect can be a one-shot.
+   *
+   * PR #21: strengthened with a module-scope signature
+   * (`LAST_INITIAL_URL_SEARCH_SIG`) so React Strict Mode's
+   * unmount/remount cycle can't re-fire the same initial-URL search
+   * and produce a duplicate `SearchHistory` row. The signature covers
+   * keyword + sort + contentType + aiFilter + initial page so two
+   * genuinely different initial URLs still each get one run.
+   *
+   * The call also drops `{ force: true }` — the signature guard
+   * inside `runSearch` is sufficient here, and keeping force=true
+   * was bypassing that guard on the second Strict-Mode mount.
    */
   const didMountRef = useRef(false);
   useEffect(() => {
     if (didMountRef.current) return;
     didMountRef.current = true;
-    if (initialQ) {
-      void runSearch(
-        {
-          keyword: initialQ,
-          sort: initialSort,
-          contentType: initialContentType,
-          aiFilter: initialAiFilter,
-          page: 1,
-        },
-        { force: true },
-      );
+    if (!initialQ) return;
+    const sig = `${initialQ}\0${initialSort}\0${initialContentType}\0${initialAiFilter}\01`;
+    const now = Date.now();
+    if (
+      LAST_INITIAL_URL_SEARCH &&
+      LAST_INITIAL_URL_SEARCH.sig === sig &&
+      now - LAST_INITIAL_URL_SEARCH.at < INITIAL_URL_GUARD_TTL_MS
+    ) {
+      // Same initial URL as the last one we just ran within the TTL
+      // window — must be a Strict-Mode remount or an instant
+      // back-forward to the same URL. Skip the duplicate POST.
+      return;
     }
+    LAST_INITIAL_URL_SEARCH = { sig, at: now };
+    void runSearch(
+      {
+        keyword: initialQ,
+        sort: initialSort,
+        contentType: initialContentType,
+        aiFilter: initialAiFilter,
+        page: 1,
+      },
+    );
     // We want this to run exactly once. initialQ/initialSort/... are
     // derived from the URL at mount and never re-read.
     // eslint-disable-next-line react-hooks/exhaustive-deps

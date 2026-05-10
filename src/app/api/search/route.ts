@@ -9,6 +9,7 @@ import {
   checkAndResetDailySearchBudget,
   recordDailySearch,
 } from "@/lib/entitlements-server";
+import { searchDedupKey, seenRecently } from "@/lib/search-dedup";
 
 const ScopeSchema = z
   .object({
@@ -36,6 +37,32 @@ const SearchSchema = z.object({
   datasetScope: ScopeSchema,
 });
 
+/**
+ * POST /api/search — keyword search.
+ *
+ * PR #21 note — duplicate-count fix (server side):
+ * PR #20 fixed the client so one user action should only fire one POST
+ * here, but QA still saw `Searches Today` incrementing by +2 and
+ * duplicate `SearchHistory` rows. Root cause: React Strict Mode
+ * unmounts then remounts the /search page once on initial navigation
+ * (and fast-refresh / back-forward can do the same). The page-level
+ * dedup ref is recreated on the second mount, so the mount-only
+ * initial-URL effect fires twice and each call lands here before the
+ * first one finishes. Since both requests already got past the Zod
+ * validator + scope resolution, both were writing a `SearchHistory`
+ * row and ticking the daily counter.
+ *
+ * Fix: a process-local idempotency cache keyed by
+ * `(userId, keyword, sort, contentType, aiFilter, page, 30s-bucket)`.
+ * We still run the provider search and return fresh results on every
+ * call (never serve stale data from the cache), but the second call
+ * within the window is treated as a no-op for the *side effects* —
+ * no duplicate `SearchHistory` row, no duplicate `searchesUsedToday`
+ * increment. The practical window (30s) was chosen so that a deliberate
+ * re-run of the same search ~30s later still counts as a new search,
+ * while every duplicate-on-mount / refresh / back-forward flow
+ * collapses to one record. See `src/lib/search-dedup.ts`.
+ */
 export async function POST(req: Request) {
   let body: unknown;
   try {
@@ -85,24 +112,38 @@ export async function POST(req: Request) {
     datasetScope: scopeInfo.scope,
   });
 
-  // Best-effort search history logging — never block the response on it.
+  // Dedup the side effects (history row + counter tick) but always
+  // return fresh results. Gated on a signed-in user — anonymous callers
+  // don't write SearchHistory / increment counters anyway, so there's
+  // nothing to dedup.
   if (userId) {
-    prisma.searchHistory
-      .create({
-        data: {
-          userId,
-          keyword: data.keyword,
-          sort: data.sort ?? "relevance",
-          contentType: data.contentType ?? "all",
-          aiFilter: data.aiFilter ?? "all",
-          resultCount: result.results.length,
-        },
-      })
-      .catch(() => {});
-    // Non-blocking: increment the per-day counter. recordDailySearch
-    // is a no-op for unlimited plans + owners so it's safe to always
-    // call after a successful search.
-    recordDailySearch(userId).catch(() => {});
+    const dedupKey = searchDedupKey({
+      userId,
+      keyword: data.keyword,
+      sort: data.sort ?? "relevance",
+      contentType: data.contentType ?? "all",
+      aiFilter: data.aiFilter ?? "all",
+      page: data.page ?? 1,
+    });
+    if (!seenRecently(dedupKey)) {
+      // Best-effort search history logging — never block the response on it.
+      prisma.searchHistory
+        .create({
+          data: {
+            userId,
+            keyword: data.keyword,
+            sort: data.sort ?? "relevance",
+            contentType: data.contentType ?? "all",
+            aiFilter: data.aiFilter ?? "all",
+            resultCount: result.results.length,
+          },
+        })
+        .catch(() => {});
+      // Non-blocking: increment the per-day counter. recordDailySearch
+      // is a no-op for unlimited plans + owners so it's safe to always
+      // call after a successful search.
+      recordDailySearch(userId).catch(() => {});
+    }
   }
 
   return NextResponse.json({
