@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { resolveDatasetScope, scopedDatasetIds } from "@/lib/dataset-scope";
 import { calculatePerformanceScore } from "@/lib/scoring";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 import type { DataQuality } from "@/types/search";
 
 /**
@@ -63,6 +64,12 @@ export async function POST(req: Request) {
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  // PRD §7: Save & Track Favorites is Starter+ only. Owners bypass.
+  const gate = await requireEntitlement("canUseSavedTracking", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
 
   let body: unknown = {};
   try {

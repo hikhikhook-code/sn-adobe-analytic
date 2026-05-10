@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { runHeatmap } from "@/lib/providers";
 import { resolveDatasetScope } from "@/lib/dataset-scope";
 import { parseHeatmapFilters } from "@/lib/heatmap";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 
 /**
  * GET /api/heatmap
@@ -25,6 +26,11 @@ import { parseHeatmapFilters } from "@/lib/heatmap";
  * requires this so manual/imported data drives heat-map analytics.
  */
 export async function GET(req: Request) {
+  // PRD §7: Heat Map is Pro/Annual. Owners bypass automatically.
+  const gate = await requireEntitlement("canUseHeatMap", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
   const scopeInfo = await resolveDatasetScope(userId);

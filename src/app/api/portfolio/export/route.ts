@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { portfolioToCsv } from "@/lib/csv";
 import { parseDatasetScope } from "@/lib/dataset-scope";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 
 /**
  * Schema for the contributor payload the client sends back to the server.
@@ -97,6 +98,12 @@ export async function POST(req: Request) {
     );
   }
   const { query, data, datasetScope: rawScope, params } = parsed.data;
+
+  // PRD §7: CSV export is Starter+ only. Owners bypass.
+  const gate = await requireEntitlement("canExportCsv", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
 
   const csv = portfolioToCsv(data);
 
