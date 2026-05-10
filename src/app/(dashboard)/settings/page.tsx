@@ -114,7 +114,7 @@ export default function SettingsPage() {
                     <span className="font-medium">{devices.limit}</span>{" "}
                     devices used
                     {devices.overLimit && (
-                      <Badge variant="destructive" className="ml-2">
+                      <Badge variant="danger" className="ml-2">
                         Over limit
                       </Badge>
                     )}
