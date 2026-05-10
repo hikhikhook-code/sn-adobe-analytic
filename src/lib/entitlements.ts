@@ -19,9 +19,18 @@ import { deviceLimitForPlan, type PlanTier } from "@/lib/device-limits";
  * the operator's own account might still have `plan: "FREE"` in the DB
  * (we haven't added admin-self-upgrade UX yet).
  *
- * ## Unknown plans
- * Unknown / malformed `plan` strings fall back to FREE tier — the most
- * restrictive bucket — so a typo never silently grants full access.
+ * ## Owner-detection order (PR #18)
+ * Owner status is derived in this order, stopping at the first match:
+ *   1. Explicit `ownerOverride: true` (tests).
+ *   2. `role` = "OWNER" or "ADMIN" (persisted DB role — the primary
+ *      source of truth once the user has been through bootstrap).
+ *   3. `email` is on OWNER_EMAILS whitelist (bootstrap fallback — covers
+ *      the window between sign-in and the DB write, and the edge case
+ *      where the DB write transiently failed).
+ *
+ * ## Unknown plans / roles
+ * Unknown / malformed values fall back to the most-restrictive tier
+ * (plan: FREE, role: USER) so a typo never silently grants full access.
  */
 
 export type UnlimitedDailySearches = "unlimited";
@@ -29,7 +38,14 @@ export type UnlimitedDailySearches = "unlimited";
 export interface Entitlements {
   /** Normalized plan tier. "FREE" on unknown / missing plan values. */
   plan: PlanTier;
-  /** True if the signed-in email is on `OWNER_EMAILS` whitelist. */
+  /**
+   * Normalized DB role. "USER" on unknown / missing values. Useful for
+   * UI copy ("Owner" vs "Admin" badge) — the actual "does this user
+   * bypass plan gates?" signal is `isOwner`, which collapses OWNER +
+   * ADMIN + env-bootstrap into one boolean.
+   */
+  role: "USER" | "OWNER" | "ADMIN";
+  /** True if this caller bypasses every plan gate (role OR env match). */
   isOwner: boolean;
   /** Human-friendly label for the current access tier. */
   planLabel: string;
@@ -74,14 +90,37 @@ export function normalizePlan(raw: string | null | undefined): PlanTier {
   return "FREE";
 }
 
+/**
+ * Normalize a stored role value. Kept local to this module so the
+ * client-safe entitlements.ts doesn't need to import from
+ * `owner-bootstrap.ts` (which would pull Prisma into the client bundle).
+ * The server-side counterpart in `owner-bootstrap.ts` accepts the same
+ * value set.
+ */
+export function normalizeRole(
+  raw: string | null | undefined,
+): "USER" | "OWNER" | "ADMIN" {
+  if (!raw) return "USER";
+  const k = raw.toUpperCase();
+  if (k === "OWNER" || k === "ADMIN") return k;
+  return "USER";
+}
+
 export interface EntitlementInput {
   /** Value of `User.plan` (any casing). Missing / unknown => FREE. */
   plan?: string | null;
   /** User's email — used to check the OWNER_EMAILS whitelist. */
   email?: string | null;
   /**
+   * Value of `User.role` (any casing). Missing / unknown => USER.
+   * Set to "OWNER" or "ADMIN" by `owner-bootstrap.ts` on sign-in; read
+   * straight from the `User` row on every gate check.
+   */
+  role?: string | null;
+  /**
    * Optional explicit owner override. Useful in tests. If omitted we
-   * derive it from `email` via `isOwnerEmail`.
+   * derive it from `role` (DB-backed, preferred) then `email` (env
+   * bootstrap fallback) via `isOwnerEmail`.
    */
   ownerOverride?: boolean;
 }
@@ -92,14 +131,19 @@ export interface EntitlementInput {
  */
 export function entitlementsFor(input: EntitlementInput = {}): Entitlements {
   const plan = normalizePlan(input.plan);
+  const role = normalizeRole(input.role);
   const isOwner =
-    input.ownerOverride === true || isOwnerEmail(input.email ?? null);
+    input.ownerOverride === true ||
+    role === "OWNER" ||
+    role === "ADMIN" ||
+    isOwnerEmail(input.email ?? null);
 
   if (isOwner) {
     return {
       plan,
+      role,
       isOwner: true,
-      planLabel: "Owner access",
+      planLabel: role === "ADMIN" ? "Admin access" : "Owner access",
       canSearch: true,
       canExportCsv: true,
       canUseSimilarSearch: true,
@@ -117,6 +161,7 @@ export function entitlementsFor(input: EntitlementInput = {}): Entitlements {
     case "STARTER":
       return {
         plan,
+        role,
         isOwner: false,
         planLabel: "Starter",
         canSearch: true,
@@ -135,6 +180,7 @@ export function entitlementsFor(input: EntitlementInput = {}): Entitlements {
     case "PRO":
       return {
         plan,
+        role,
         isOwner: false,
         planLabel: "Pro",
         canSearch: true,
@@ -151,6 +197,7 @@ export function entitlementsFor(input: EntitlementInput = {}): Entitlements {
     case "ANNUAL":
       return {
         plan,
+        role,
         isOwner: false,
         planLabel: "Annual",
         canSearch: true,
@@ -168,6 +215,7 @@ export function entitlementsFor(input: EntitlementInput = {}): Entitlements {
     default:
       return {
         plan: "FREE",
+        role,
         isOwner: false,
         planLabel: "Free",
         // Free tier can search (limited per-day) but NOT export / similar
@@ -188,7 +236,7 @@ export function entitlementsFor(input: EntitlementInput = {}): Entitlements {
 
 /** Anonymous (guest) bundle — FREE tier rules, `isOwner: false`. */
 export function guestEntitlements(): Entitlements {
-  return entitlementsFor({ plan: "FREE", email: null });
+  return entitlementsFor({ plan: "FREE", email: null, role: null });
 }
 
 /**

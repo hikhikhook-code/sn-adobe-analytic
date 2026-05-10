@@ -6,6 +6,7 @@ import {
   guestEntitlements,
   type Entitlements,
 } from "@/lib/entitlements";
+import { bootstrapOwnerIfEligible } from "@/lib/owner-bootstrap";
 
 /**
  * Server-side convenience that merges "who is the caller?" + "what's
@@ -24,6 +25,12 @@ export interface SessionEntitlements {
   userId: string | null;
   email: string | null;
   plan: string | null;
+  /** Normalized DB role. "USER" for plain users / guests. */
+  role: "USER" | "OWNER" | "ADMIN";
+  /** ISO timestamp the user first became OWNER/ADMIN, or null. */
+  ownerAccessGrantedAt: Date | null;
+  /** "env_bootstrap" | "manual" | "seed" | null. Null while role === USER. */
+  ownerAccessSource: string | null;
   searchesUsedToday: number;
   searchResetAt: Date | null;
   entitlements: Entitlements;
@@ -33,9 +40,21 @@ export interface SessionEntitlements {
  * Load entitlements for the currently-signed-in user. Returns a guest
  * bundle (no userId) when unauthenticated.
  *
- * We purposely do not cache at module level — the session cookie can
- * change between requests and plan updates must be reflected on the
- * next request, not the next cold start.
+ * ## Owner bootstrap
+ * On every signed-in call we attempt `bootstrapOwnerIfEligible`. That
+ * helper is idempotent, race-safe, and only PROMOTES plain USERs when
+ * their email is on `OWNER_EMAILS`. Calling it here (rather than only
+ * from the NextAuth sign-in event) buys us two things:
+ *
+ *   1. If the sign-in event's DB write transiently failed, the next
+ *      gated request succeeds and the user sees Owner access.
+ *   2. Operators can add an already-signed-in user to OWNER_EMAILS
+ *      and have that user's next request promote them, without
+ *      forcing a sign-out / sign-in.
+ *
+ * We do not cache at module level — the session cookie can change
+ * between requests and role updates must be reflected on the next
+ * request, not the next cold start.
  */
 export async function getSessionEntitlements(): Promise<SessionEntitlements> {
   const session = await getServerSession(authOptions);
@@ -45,6 +64,9 @@ export async function getSessionEntitlements(): Promise<SessionEntitlements> {
       userId: null,
       email: session?.user?.email ?? null,
       plan: null,
+      role: "USER",
+      ownerAccessGrantedAt: null,
+      ownerAccessSource: null,
       searchesUsedToday: 0,
       searchResetAt: null,
       entitlements: guestEntitlements(),
@@ -56,20 +78,32 @@ export async function getSessionEntitlements(): Promise<SessionEntitlements> {
     select: {
       email: true,
       plan: true,
+      role: true,
+      ownerAccessGrantedAt: true,
+      ownerAccessSource: true,
       searchesUsedToday: true,
       searchResetAt: true,
     },
   });
 
+  // Lazy bootstrap — idempotent and swallows its own errors. Returns the
+  // authoritative post-call role so we can feed it straight into the
+  // entitlements bundle without a second DB read.
+  const bootstrapped = await bootstrapOwnerIfEligible(userId, user?.email);
+
   const entitlements = entitlementsFor({
     plan: user?.plan,
     email: user?.email,
+    role: bootstrapped.role,
   });
 
   return {
     userId,
     email: user?.email ?? session?.user?.email ?? null,
     plan: user?.plan ?? null,
+    role: bootstrapped.role,
+    ownerAccessGrantedAt: bootstrapped.grantedAt,
+    ownerAccessSource: bootstrapped.source,
     searchesUsedToday: user?.searchesUsedToday ?? 0,
     searchResetAt: user?.searchResetAt ?? null,
     entitlements,
@@ -105,14 +139,22 @@ export async function checkAndResetDailySearchBudget(
     select: {
       email: true,
       plan: true,
+      role: true,
       searchesUsedToday: true,
       searchResetAt: true,
     },
   });
 
+  // Give the bootstrap a chance to promote a USER-on-whitelist BEFORE
+  // we decide whether this request is subject to the daily cap.
+  // `bootstrapOwnerIfEligible` is idempotent + error-tolerant, so the
+  // extra call is safe even on the hot path.
+  const bootstrapped = await bootstrapOwnerIfEligible(userId, user?.email);
+
   const entitlements = entitlementsFor({
     plan: user?.plan,
     email: user?.email,
+    role: bootstrapped.role,
   });
   const unlimited = entitlements.maxSearchesPerDay === "unlimited";
   const limit = unlimited
@@ -168,11 +210,12 @@ export async function checkAndResetDailySearchBudget(
 export async function recordDailySearch(userId: string): Promise<void> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { email: true, plan: true },
+    select: { email: true, plan: true, role: true },
   });
   const entitlements = entitlementsFor({
     plan: user?.plan,
     email: user?.email,
+    role: user?.role,
   });
   if (entitlements.maxSearchesPerDay === "unlimited") return;
 

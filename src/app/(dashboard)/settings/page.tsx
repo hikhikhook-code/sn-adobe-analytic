@@ -27,9 +27,30 @@ interface DeviceUsageResponse {
 interface EntitlementsResponse {
   signedIn: boolean;
   plan: string | null;
+  role: "USER" | "OWNER" | "ADMIN";
+  ownerAccessGrantedAt: string | null;
+  ownerAccessSource: string | null;
   searchesUsedToday: number;
   searchResetAt: string | null;
   entitlements: Entitlements;
+}
+
+/**
+ * Human-readable label for the `ownerAccessSource` string. Kept out of
+ * the DB / API layer so the server can keep passing raw tokens and the
+ * UI can rephrase them without a migration.
+ */
+function sourceLabel(source: string | null | undefined): string {
+  switch (source) {
+    case "env_bootstrap":
+      return "env bootstrap";
+    case "manual":
+      return "database (manual)";
+    case "seed":
+      return "database (seed)";
+    default:
+      return "database";
+  }
 }
 
 export default function SettingsPage() {
@@ -114,10 +135,39 @@ export default function SettingsPage() {
                     {isOwner && (
                       <Badge variant="success" className="gap-1">
                         <ShieldCheck className="h-3 w-3" />
-                        Owner access
+                        {ent?.role === "ADMIN"
+                          ? "Admin access"
+                          : "Owner access"}
                       </Badge>
                     )}
                   </div>
+                  {isOwner && (
+                    <p className="mt-2 text-[11px] text-muted-foreground">
+                      Role: <span className="font-medium">{ent?.role}</span>
+                      {" · "}Source:{" "}
+                      <span className="font-medium">
+                        {sourceLabel(ent?.ownerAccessSource)}
+                      </span>
+                      {ent?.ownerAccessGrantedAt && (
+                        <>
+                          {" · "}Granted{" "}
+                          <span className="font-medium">
+                            {new Date(
+                              ent.ownerAccessGrantedAt,
+                            ).toLocaleDateString()}
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  )}
+                  {isOwner && ent?.ownerAccessSource === "env_bootstrap" && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Your role persists in the database. Removing your
+                      email from <code className="font-mono">OWNER_EMAILS</code>{" "}
+                      will not revoke access — edit the user row directly
+                      to downgrade.
+                    </p>
+                  )}
                 </div>
               </>
             ) : (

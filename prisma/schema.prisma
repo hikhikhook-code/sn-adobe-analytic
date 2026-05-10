@@ -20,6 +20,28 @@ model User {
   hashedPassword    String?
   image             String?
   plan              String    @default("FREE") // FREE | STARTER | PRO | ANNUAL
+  // Access-control role. Stored as a string because SQLite's Prisma
+  // provider doesn't support enums cleanly (same reason `plan` is a
+  // string). Valid values: "USER" | "OWNER" | "ADMIN". Anything else
+  // is treated as "USER" by `normalizeRole()` — so a typo / stale value
+  // never silently grants elevated access.
+  //
+  // IMPORTANT: this field is written ONLY by server-side code (the
+  // owner-bootstrap helper during sign-in, or an ops user editing the
+  // DB directly). There is no public endpoint that lets a signed-in
+  // user change their own role, and no API route accepts `role` in a
+  // request body. See `src/lib/owner-bootstrap.ts`.
+  role              String    @default("USER")
+  // First time we promoted this user out of the default USER role.
+  // Never overwritten on subsequent bootstraps — lets the Settings
+  // page show "Owner since <date>" honestly instead of jumping every
+  // time the user re-signs-in.
+  ownerAccessGrantedAt DateTime?
+  // How the user got their elevated role. Today the only automatic
+  // source is "env_bootstrap" (matched OWNER_EMAILS on login). Reserved
+  // strings: "env_bootstrap" | "manual" | "seed". `null` while role is
+  // "USER"; cleared if role is ever reset back to "USER".
+  ownerAccessSource String?
   searchesUsedToday Int       @default(0)
   searchResetAt     DateTime  @default(now())
   // Which imported dataset powers this user's Search/Dashboard/Portfolio/

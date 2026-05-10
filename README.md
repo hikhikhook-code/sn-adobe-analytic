@@ -69,8 +69,16 @@ niche heat maps, and export results to CSV.
     so history rows stay accurate after renames or archives
   - User isolation guardrails: every scope resolution re-verifies
     dataset ownership server-side before trusting a specific id
-- **Phase 6+** (still deferred) — official Adobe data source, similar-image
-  search, pricing flow.
+- **Phase 3+** (now complete via PR #17 + #18):
+  - PR #17 — Pricing / Plan Gating foundation + env-based owner whitelist
+  - PR #18 — **Database-backed owner access**: `User.role` +
+    `ownerAccessGrantedAt` + `ownerAccessSource`. `OWNER_EMAILS` is now
+    a bootstrap-only env var; once a user's email matches on login or
+    register, their role is promoted to `OWNER` in the DB and survives
+    even if the env var is later removed. See [*Owner / admin access*](#owner--admin-access) below.
+
+- **Phase 3+** (still deferred) — official Adobe data source, similar-image
+  search, pricing checkout.
 
 ## Tech stack
 
@@ -370,7 +378,75 @@ The `/export` history table surfaces this as "Dataset: Q3 2025" /
 historical CSV came from which scope — even after you archive or
 rename the dataset.
 
-## Implemented in Phase 1
+## Owner / admin access
+
+PRD §7 carves out an "owner / whitelisted" tier that bypasses every plan
+gate — for the operator's own accounts and early admin users. PR #18
+makes this **database-backed** so the grant persists after removing the
+env var.
+
+### How owner access is granted
+
+1. **Bootstrap from env.** Set `OWNER_EMAILS` in your local `.env` or
+   Vercel env vars (comma-separated, case-insensitive). **Never commit
+   real emails.** `.env.example` has placeholders only
+   (`owner@example.com`, `admin@example.com`).
+2. **Sign in or register** with an email on that list. On the sign-in
+   event (and on registration) the server calls
+   `bootstrapOwnerIfEligible` which promotes your DB role from the
+   default `"USER"` to `"OWNER"` and stamps:
+   - `User.role = "OWNER"`
+   - `User.ownerAccessGrantedAt = <now>`
+   - `User.ownerAccessSource = "env_bootstrap"`
+3. **The role is persistent.** On subsequent requests the entitlement
+   helper reads the DB role first. Removing your email from
+   `OWNER_EMAILS` after the fact does **not** revoke access — that's a
+   deliberate choice so a mistyped env var can't lock the operator
+   out of their own app. To revoke, edit the user row directly:
+   `UPDATE User SET role='USER', ownerAccessGrantedAt=NULL, ownerAccessSource=NULL WHERE email='…';`
+
+### Role values
+
+| Role | Meaning |
+| --- | --- |
+| `USER` | Default. Follows plan rules (PRD §7 matrix). |
+| `OWNER` | Bypasses every plan gate. Granted via `OWNER_EMAILS` bootstrap. |
+| `ADMIN` | Same capabilities as `OWNER`. Reserved for out-of-band DB edits. The app does not auto-promote anyone to `ADMIN`. |
+
+Any other stored value normalizes to `USER` at read time, so a typo or
+stale value never silently grants elevated access.
+
+### Security guarantees
+
+- **No public endpoint changes `User.role`.** Register, login, password
+  reset, profile edit — none of them accept a `role` in their request
+  body. The only writes happen inside `owner-bootstrap.ts` using a
+  server-verified session and the server-only `OWNER_EMAILS` env var.
+- **`OWNER_EMAILS` is never exposed to the client.** The only
+  owner-visible signal is `isOwner: true/false` on
+  `/api/user/entitlements`, plus the caller's own role / grant date /
+  source. We never echo the env-var list or anyone else's role.
+- **Idempotent bootstrap.** Running bootstrap twice on the same user
+  is a no-op. Already-`OWNER`/`ADMIN` users are never re-stamped
+  (`ownerAccessGrantedAt` keeps the first-grant date). Concurrent
+  sign-ins use a race-safe `updateMany({ where: { role: "USER" } })`
+  so exactly one request does the promotion.
+- **Failure-tolerant.** If the DB write fails during bootstrap the
+  user is not blocked — env-level `isOwnerEmail()` still grants owner
+  access on that single request via `entitlementsFor()`'s email
+  fallback, and the next successful request retries the DB write.
+
+### Settings UI
+
+`/settings` → **Profile** card shows:
+
+- Current plan label.
+- Role badge (`Owner access` / `Admin access`) when elevated.
+- Role name, grant source, and grant date underneath.
+- A reminder that removing `OWNER_EMAILS` won't revoke persisted owner
+  access (for `env_bootstrap` source only).
+
+
 
 - Sidebar nav (dark navy), top bar, lavender background, white cards
 - Auth: email/password sign-in, registration, sign-out (forgot/reset stubbed)

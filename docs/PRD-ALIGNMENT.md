@@ -762,3 +762,127 @@ itself never leaves the server.
 - No rate-limiting beyond the per-day search budget. The forgot-
   password rate limit still belongs to the shared rate-limit
   middleware PR.
+
+
+
+
+---
+
+## 13. Database-backed owner access (PR #18)
+
+PR #17 recognized owner accounts purely from `OWNER_EMAILS` on every
+request. PR #18 promotes that into a **persistent, DB-backed role**
+while keeping the env var as a bootstrap-only signal. The net effect:
+`OWNER_EMAILS` is now how you grant access *once*; the DB is how the
+app remembers you have access going forward.
+
+### Schema additions
+
+| Column | Type | Purpose |
+| --- | --- | --- |
+| `User.role` | `String @default("USER")` | `"USER"` / `"OWNER"` / `"ADMIN"`. Stored as a string because Prisma + SQLite don't play nicely with enums. Any unknown value normalizes to `"USER"` at read time. |
+| `User.ownerAccessGrantedAt` | `DateTime?` | First time the user was promoted out of `USER`. Never overwritten on subsequent bootstraps so the Settings page can show an honest "Owner since …". |
+| `User.ownerAccessSource` | `String?` | Free-form token describing the grant. `"env_bootstrap"` for auto-promotions; reserved `"manual"` / `"seed"` for future ops tooling. `null` while `role === "USER"`. |
+
+### Owner-detection order (at read time)
+
+`entitlementsFor()` now derives `isOwner` in this precedence:
+
+1. Explicit `ownerOverride: true` (tests only).
+2. `role === "OWNER" || role === "ADMIN"` — the primary DB-backed path.
+3. `email` is on `OWNER_EMAILS` — env fallback. Covers the narrow
+   window between a successful sign-in and the bootstrap DB write
+   completing (or the case where that write transiently failed).
+
+The belt-and-suspenders email fallback means a first-time sign-in with
+a whitelisted email grants owner access *on the very first request*,
+even if the DB promotion hasn't landed yet. The next successful request
+picks up the persisted role and the env fallback becomes redundant.
+
+### Bootstrap helper
+
+`src/lib/owner-bootstrap.ts` owns every `role` write the app performs.
+Its contract:
+
+- **Idempotent.** Re-running on an already-elevated user is a no-op.
+- **Non-destructive.** Never DOWNgrades. `ADMIN` stays `ADMIN`. A user
+  whose email was on the whitelist but has since been removed keeps
+  their `OWNER` role — only a direct DB edit can revoke.
+- **Race-safe.** Uses `updateMany({ where: { id, role: "USER" }})` so
+  concurrent sign-ins produce exactly one promotion.
+- **Failure-tolerant.** All DB reads / writes are wrapped — bootstrap
+  errors are swallowed so they can never 500 the sign-in / request.
+  The env-email fallback in `entitlementsFor()` keeps owner access
+  intact even when the DB write fails.
+
+### Where bootstrap is called
+
+1. **NextAuth `events.signIn`** (eager) — runs after every successful
+   sign-in, credentials OR Google. Promotes whitelisted USERs to
+   OWNER at the moment they authenticate.
+2. **`POST /api/auth/register`** (eager) — covers the case where the
+   operator whitelists their email and then registers fresh; they
+   become OWNER at account creation, not only on the next sign-in.
+3. **`getSessionEntitlements` + `checkAndResetDailySearchBudget`**
+   (lazy) — runs on every gated request. Safety net for transient
+   sign-in-event failures and for operators who add someone to
+   `OWNER_EMAILS` while that user is already signed in.
+
+### Write-surface guarantees
+
+- No public endpoint accepts `role` in its request body. `POST
+  /api/auth/register`, `PATCH /api/favorites`, `PATCH /api/collections`,
+  the password-reset endpoints, the `/api/user/*` reads — every route
+  was audited; none of them let a signed-in user change their own or
+  anyone else's role.
+- `role` is written only inside `owner-bootstrap.ts`, which takes a
+  server-verified `userId` + email pair and never trusts request-body
+  input. The only other way to change a role is a direct DB edit —
+  which requires operator credentials the app itself never holds.
+
+### `/api/user/entitlements` shape (updated)
+
+```ts
+{
+  signedIn: boolean,
+  plan: string | null,
+  role: "USER" | "OWNER" | "ADMIN",
+  ownerAccessGrantedAt: string | null,      // ISO date
+  ownerAccessSource: string | null,          // "env_bootstrap" | "manual" | …
+  searchesUsedToday: number,
+  searchResetAt: string | null,
+  entitlements: Entitlements                 // full plan-gate bundle, now
+                                             //   includes a `role` field too
+}
+```
+
+The response exposes the caller's OWN role + grant metadata so Settings
+can render "Owner access · Source: env bootstrap · Granted Mar 14".
+It does NOT expose `OWNER_EMAILS` in any form — the env var stays
+server-only.
+
+### Settings UI
+
+The Profile card now shows:
+
+- Plan label (e.g. `Pro`).
+- A green `Owner access` or `Admin access` badge when elevated.
+- A small sub-line: `Role: OWNER · Source: env bootstrap · Granted <date>`.
+- A persistence reminder for `env_bootstrap` accounts: removing your
+  email from `OWNER_EMAILS` will NOT revoke DB-persisted owner access;
+  ops must edit the row directly.
+
+### What PR #18 does NOT ship
+
+- No admin-edit UI for changing anyone's role. Role changes happen
+  either at bootstrap time or via direct DB edits.
+- No "revoke my own owner access" button. Same rationale — narrow the
+  blast radius of any role-mutation UI until we have the auth surface
+  to do it safely.
+- No `ADMIN` auto-promotion. `OWNER_EMAILS` only ever promotes to
+  `OWNER`; the `ADMIN` tier is reserved for out-of-band DB edits.
+- No schema migration for SQLite beyond the three new columns — both
+  `ownerAccessGrantedAt` and `ownerAccessSource` are nullable so
+  existing rows survive the `prisma db push` without data loss.
+- No changes to payment / checkout / plan gating behavior beyond
+  plumbing the new `role` field through `entitlementsFor()`.
