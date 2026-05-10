@@ -1,5 +1,11 @@
 import type { SearchAsset } from "@/types/search";
-import type { ProviderContributorResult } from "@/lib/providers/types";
+import type {
+  HeatmapFilters,
+  HeatmapTile,
+  ProviderContributorResult,
+  ProviderHeatmapResult,
+} from "@/lib/providers/types";
+import { describeHeatmapPeriod } from "@/lib/heatmap";
 
 const CSV_HEADERS = [
   "ID",
@@ -171,6 +177,190 @@ export function portfolioToCsv(data: ProviderContributorResult): string {
         .map(escape)
         .join(","),
     );
+  }
+
+  return out.join("\n");
+}
+
+/**
+ * Build a CSV for the heat-map page. Two modes:
+ *
+ *   - `mode = "list"`: dump the niche grid currently visible in the UI.
+ *     One row per niche, summary stats only.
+ *
+ *   - `mode = "detail"`: drilldown for a single niche. Multi-section CSV:
+ *       1. Niche overview (one row of summary stats)
+ *       2. Top assets (one row each)
+ *       3. Related keywords (frequency)
+ *       4. Content-type breakdown (one row per content type)
+ *
+ * Honors `result.capabilities.downloadsAvailable` and the per-tile
+ * `metricsAvailable` so we never emit fake `0` numbers when the
+ * provider couldn't supply real ones.
+ */
+export function heatmapToCsv(
+  result: ProviderHeatmapResult,
+  mode: "list" | "detail",
+): string {
+  const downloadsAvailable = result.capabilities?.downloadsAvailable !== false;
+  const dl = (n: number, available?: boolean) =>
+    !downloadsAvailable || available === false ? "Unavailable" : String(n);
+  const filters: HeatmapFilters = result.appliedFilters ?? {};
+  const filterSummary = [
+    `Content type: ${filters.contentType ?? "all"}`,
+    `Period: ${describeHeatmapPeriod(filters.period ?? "all")}`,
+    `Min downloads: ${filters.minDownloads ?? 0}`,
+    `Sort: ${filters.sort ?? "opportunity"}`,
+  ].join("; ");
+
+  const out: string[] = [];
+
+  // Header section — same for list and detail.
+  out.push(
+    [
+      "Section",
+      "Provider",
+      "Data Quality",
+      "Filters",
+      "Generated",
+    ]
+      .map(escape)
+      .join(","),
+  );
+  out.push(
+    [
+      "meta",
+      result.providerName,
+      result.dataQuality,
+      filterSummary,
+      new Date().toISOString(),
+    ]
+      .map(escape)
+      .join(","),
+  );
+
+  if (mode === "list") {
+    out.push("");
+    out.push(
+      [
+        "Section",
+        "Niche",
+        "Downloads",
+        "Assets",
+        "Competition",
+        "Trend",
+        "Opportunity Score",
+        "Avg Performance",
+        "Metrics Available",
+      ]
+        .map(escape)
+        .join(","),
+    );
+    for (const n of result.niches) {
+      out.push(
+        [
+          "niche",
+          n.keyword,
+          dl(n.downloads, n.metricsAvailable),
+          n.assets,
+          n.competition,
+          n.trendAvailable ? n.trend : "Unavailable",
+          n.opportunityScore,
+          n.metricsAvailable ? n.avgPerformanceScore : "Unavailable",
+          n.metricsAvailable ? "true" : "false",
+        ]
+          .map(escape)
+          .join(","),
+      );
+    }
+    return out.join("\n");
+  }
+
+  // Detail mode — single niche. The caller is expected to have already
+  // ensured `result.niches.length === 1`; we still defensively handle the
+  // empty case so the CSV isn't broken.
+  const niche: HeatmapTile | undefined = result.niches[0];
+  out.push("");
+  out.push(
+    [
+      "Section",
+      "Niche",
+      "Downloads",
+      "Assets",
+      "Competition",
+      "Trend",
+      "Opportunity Score",
+      "Avg Performance",
+    ]
+      .map(escape)
+      .join(","),
+  );
+  if (niche) {
+    out.push(
+      [
+        "overview",
+        niche.keyword,
+        dl(niche.downloads, niche.metricsAvailable),
+        niche.assets,
+        niche.competition,
+        niche.trendAvailable ? niche.trend : "Unavailable",
+        niche.opportunityScore,
+        niche.metricsAvailable ? niche.avgPerformanceScore : "Unavailable",
+      ]
+        .map(escape)
+        .join(","),
+    );
+  }
+
+  // Top assets
+  out.push("");
+  out.push(
+    [
+      "Section",
+      "Asset ID",
+      "Title",
+      "Content Type",
+      "Downloads",
+      "Performance",
+      "Upload Date",
+      "Contributor",
+      "Keywords",
+      "Adobe Stock URL",
+    ]
+      .map(escape)
+      .join(","),
+  );
+  for (const a of niche?.topAssets ?? []) {
+    out.push(
+      [
+        "asset",
+        a.id,
+        a.title,
+        a.contentType,
+        dl(a.downloads, a.metricsAvailable),
+        a.metricsAvailable === false ? "Unavailable" : a.performanceScore,
+        a.uploadDate.slice(0, 10),
+        a.contributorName,
+        a.keywords.join("; "),
+        a.adobeStockUrl,
+      ]
+        .map(escape)
+        .join(","),
+    );
+  }
+
+  // Related keywords
+  out.push("");
+  out.push(["Section", "Related Keyword"].map(escape).join(","));
+  for (const k of niche?.relatedKeywords ?? []) {
+    out.push(["related", k].map(escape).join(","));
+  }
+
+  // Content-type breakdown
+  out.push("");
+  out.push(["Section", "Content Type", "Count"].map(escape).join(","));
+  for (const c of niche?.contentTypeBreakdown ?? []) {
+    out.push(["breakdown", c.contentType, c.count].map(escape).join(","));
   }
 
   return out.join("\n");
