@@ -83,7 +83,6 @@ export default function SavedPage() {
     create: createCollection,
     rename: renameCollection,
     remove: removeCollection,
-    reload: reloadCollections,
   } = useCollections();
 
   const [tab, setTab] = useState<SavedTab>("assets");
