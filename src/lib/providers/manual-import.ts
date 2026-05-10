@@ -14,6 +14,13 @@ import {
   matchesContentType,
   sortNiches,
 } from "@/lib/heatmap";
+import {
+  DEFAULT_TRENDING_FILTERS,
+  matchesTrendingContentType,
+  seasonalStatus,
+  sortTrending,
+  trendingPeriodMs,
+} from "@/lib/trending";
 import type { SearchAsset } from "@/types/search";
 import type { DatasetScope } from "@/lib/dataset-scope";
 import {
@@ -30,6 +37,11 @@ import type {
   ProviderSearchRequest,
   ProviderSearchResult,
   ProviderTrendingResult,
+  RisingNiche,
+  SeasonalTrend,
+  TopPerformer,
+  TrendingFilters,
+  TrendingKeyword,
 } from "./types";
 
 const PROVIDER_ID = "manual";
@@ -434,7 +446,14 @@ export const manualImportProvider: DataProvider = {
         };
         cur.downloads += a.downloads;
         cur.assets.push(a);
-        if (a.performanceScore > 0 || a.metricsAvailable !== false) {
+        // Only roll an asset's performance score into the niche average
+        // when we actually have a non-zero number to average. The CSV
+        // importer leaves performanceScore at 0 when the user omits the
+        // column AND we couldn't derive it (no downloads or no upload
+        // date). Including those zeros depresses the average for niches
+        // dominated by minimally-tagged rows; gating on `> 0` keeps
+        // imported-but-incomplete data from poisoning the score.
+        if (a.performanceScore > 0) {
           cur.perfSum += a.performanceScore;
           cur.perfCount += 1;
         }
@@ -481,12 +500,15 @@ export const manualImportProvider: DataProvider = {
 
     const maxDownloads = Math.max(...thresholded.map((v) => v.downloads));
 
-    // Stage 4: build tiles. Cap to top 24 by downloads BEFORE applying
+    // Stage 4: build tiles. Cap to top 48 by downloads BEFORE applying
     // the requested sort — the heatmap is a viewport, not a paginated
-    // list, and surfacing 5,000 tiny tiles helps no one.
+    // list, but the previous top-24 cap was too aggressive for users
+    // with broad keyword spreads (small niches got hidden even when
+    // they would visibly fit on screen). Top-48 keeps perf reasonable
+    // while restoring more of the long tail.
     const top = thresholded
       .sort((a, b) => b.downloads - a.downloads)
-      .slice(0, 24);
+      .slice(0, 48);
 
     function buildTile(v: NicheAccum): HeatmapTile {
       const competition = Math.min(
@@ -577,50 +599,224 @@ export const manualImportProvider: DataProvider = {
     } satisfies ProviderHeatmapResult;
   },
 
-  async trending(ctx) {
+  async trending(ctx, filters) {
     if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
     const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
-    if (rows.length === 0) throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
+    if (rows.length === 0)
+      throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
     const assets = rows.map(toSearchAsset);
+
+    const applied: TrendingFilters = {
+      period: filters?.period ?? DEFAULT_TRENDING_FILTERS.period,
+      contentType:
+        filters?.contentType ?? DEFAULT_TRENDING_FILTERS.contentType,
+      minVolume: filters?.minVolume ?? DEFAULT_TRENDING_FILTERS.minVolume,
+      sort: filters?.sort ?? DEFAULT_TRENDING_FILTERS.sort,
+      limit: filters?.limit ?? DEFAULT_TRENDING_FILTERS.limit,
+    };
+
+    // Apply content-type filter to the underlying asset set BEFORE
+    // grouping. PRD: filters must affect provider aggregation, not
+    // just the displayed list.
+    const ctFiltered = assets.filter((a) =>
+      matchesTrendingContentType(a, applied.contentType!),
+    );
+
+    if (ctFiltered.length === 0) {
+      return emptyTrendingEnvelope(
+        applied,
+        "Imported assets do not match the current content-type filter.",
+      );
+    }
+
     const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
-    const byKeyword = new Map<
-      string,
-      { volume: number; recent: number; prev: number }
-    >();
-    for (const a of assets) {
+    // Half-window split for recent vs previous. Period N → last N is
+    // recent, the previous N is prev. The trendingPeriodMs helper is
+    // the single source of truth for these durations.
+    const halfMs = trendingPeriodMs(applied.period!);
+
+    interface KwAccum {
+      keyword: string;
+      volume: number;
+      assets: SearchAsset[];
+      recent: number;
+      prev: number;
+      hasRecent: boolean;
+      hasPrev: boolean;
+    }
+    const byKeyword = new Map<string, KwAccum>();
+    for (const a of ctFiltered) {
       const ts = new Date(a.uploadDate).getTime();
-      const isRecent = now - ts <= 90 * day;
-      const isPrev = now - ts <= 180 * day && now - ts > 90 * day;
+      const age = Number.isFinite(ts) ? now - ts : Number.POSITIVE_INFINITY;
+      const isRecent = age <= halfMs;
+      const isPrev = age <= halfMs * 2 && age > halfMs;
       for (const kw of a.keywords) {
-        const key = kw.toLowerCase();
-        const cur = byKeyword.get(key) ?? { volume: 0, recent: 0, prev: 0 };
+        const key = kw.toLowerCase().trim();
+        if (!key) continue;
+        const cur = byKeyword.get(key) ?? {
+          keyword: key,
+          volume: 0,
+          assets: [],
+          recent: 0,
+          prev: 0,
+          hasRecent: false,
+          hasPrev: false,
+        };
         cur.volume += a.downloads;
-        if (isRecent) cur.recent += a.downloads;
-        if (isPrev) cur.prev += a.downloads;
+        cur.assets.push(a);
+        if (isRecent) {
+          cur.recent += a.downloads;
+          cur.hasRecent = true;
+        }
+        if (isPrev) {
+          cur.prev += a.downloads;
+          cur.hasPrev = true;
+        }
         byKeyword.set(key, cur);
       }
     }
+
     if (byKeyword.size === 0) {
-      throw new ProviderNoDataError(
-        PROVIDER_ID,
-        "imported assets have no keywords",
+      return emptyTrendingEnvelope(
+        applied,
+        "Imported assets have no keywords for the current filters.",
       );
     }
-    const trending = Array.from(byKeyword.entries())
-      .map(([keyword, v]) => {
-        const growth =
-          v.prev > 0
-            ? Math.round(((v.recent - v.prev) / v.prev) * 100)
-            : v.recent > 0
-              ? 100
-              : 0;
-        return { keyword, volume: v.volume, growth };
+
+    function growthFor(v: { recent: number; prev: number }): number {
+      if (v.prev > 0) {
+        return Math.round(((v.recent - v.prev) / v.prev) * 100);
+      }
+      // No prev-window data — if recent is non-zero, treat as +100% rather
+      // than infinity. If both windows are empty, growth is 0.
+      return v.recent > 0 ? 100 : 0;
+    }
+
+    // Section 1 — Trending keywords. Honor minVolume + sort + limit.
+    const trendingPool: TrendingKeyword[] = Array.from(byKeyword.values())
+      .filter((v) => v.volume >= (applied.minVolume ?? 0))
+      .map((v) => ({
+        keyword: v.keyword,
+        volume: v.volume,
+        growth: growthFor(v),
+        metricsAvailable: true,
+      }));
+    const trending = sortTrending(trendingPool, applied.sort!).slice(
+      0,
+      applied.limit,
+    );
+
+    // Section 2 — Rising niches. Same pool but require non-trivial
+    // growth and at least 2 assets (a single asset can't be a "niche").
+    const competitionFor = (assetsCount: number, downloads: number) => {
+      if (downloads <= 0) return 0;
+      return Math.min(
+        100,
+        Math.round((assetsCount / Math.max(1, downloads / 100)) * 10),
+      );
+    };
+    const risingPool: RisingNiche[] = Array.from(byKeyword.values())
+      .filter((v) => v.assets.length >= 2)
+      .filter((v) => v.volume >= (applied.minVolume ?? 0))
+      .map((v) => ({
+        keyword: v.keyword,
+        downloads: v.volume,
+        assets: v.assets.length,
+        growth: growthFor(v),
+        competition: competitionFor(v.assets.length, v.volume),
+        metricsAvailable: true,
+      }))
+      .filter((n) => n.growth > 0);
+    const risingNiches = risingPool
+      .sort((a, b) =>
+        applied.sort === "volume"
+          ? b.downloads - a.downloads || b.growth - a.growth
+          : b.growth - a.growth || b.downloads - a.downloads,
+      )
+      .slice(0, applied.limit);
+
+    // Section 3 — Top performers in the active period. Filter by upload
+    // date so only assets uploaded within the period qualify, then sort
+    // by downloads. We expose `recentDownloads` as the asset's lifetime
+    // downloads here (we don't have time-series telemetry from a CSV
+    // import) and rely on the period filter on the asset to honor the
+    // user's chosen window.
+    const topPerformers: TopPerformer[] = ctFiltered
+      .filter((a) => {
+        const ts = new Date(a.uploadDate).getTime();
+        if (!Number.isFinite(ts) || ts === 0) return false;
+        return now - ts <= halfMs;
       })
-      .sort((a, b) => b.growth - a.growth || b.volume - a.volume)
-      .slice(0, 12);
+      .filter((a) => a.metricsAvailable !== false && a.downloads > 0)
+      .sort(
+        (a, b) =>
+          b.downloads - a.downloads ||
+          b.performanceScore - a.performanceScore,
+      )
+      .slice(0, applied.limit)
+      .map((a) => ({ asset: a, recentDownloads: a.downloads }));
+
+    // Section 4 — Seasonal trends. Bucket each keyword's lifetime
+    // downloads by upload month, find the peak month, and report the
+    // peak vs avg lift. Requires at least 6 distinct upload months
+    // across the keyword's assets to qualify (otherwise the seasonal
+    // signal is too noisy to label honestly).
+    const seasonalCandidates = Array.from(byKeyword.values()).filter(
+      (v) => v.assets.length >= 4 && v.volume >= (applied.minVolume ?? 0),
+    );
+    const seasonal: SeasonalTrend[] = seasonalCandidates
+      .map((v) => {
+        const monthBuckets = new Array<number>(12).fill(0);
+        const monthsSeen = new Set<number>();
+        for (const a of v.assets) {
+          const ts = new Date(a.uploadDate).getTime();
+          if (!Number.isFinite(ts) || ts === 0) continue;
+          const m = new Date(ts).getMonth();
+          monthBuckets[m] += a.downloads;
+          monthsSeen.add(m);
+        }
+        const total = monthBuckets.reduce((s, n) => s + n, 0);
+        if (total <= 0 || monthsSeen.size < 6) {
+          return {
+            keyword: v.keyword,
+            peakMonth: 0,
+            peakLift: 0,
+            status: "off_season" as const,
+            available: false,
+          };
+        }
+        const avg = total / 12;
+        let peakMonth = 0;
+        let peakValue = monthBuckets[0];
+        for (let i = 1; i < 12; i++) {
+          if (monthBuckets[i] > peakValue) {
+            peakValue = monthBuckets[i];
+            peakMonth = i;
+          }
+        }
+        const peakLift = avg > 0 ? peakValue / avg : 0;
+        return {
+          keyword: v.keyword,
+          peakMonth,
+          peakLift,
+          status: seasonalStatus(peakMonth),
+          available: peakLift >= 1.5, // require a meaningful spike
+        };
+      })
+      .filter((s) => s.available)
+      .sort((a, b) => {
+        const rank = (st: SeasonalTrend["status"]) =>
+          st === "in_season" ? 0 : st === "approaching" ? 1 : 2;
+        return rank(a.status) - rank(b.status) || b.peakLift - a.peakLift;
+      })
+      .slice(0, applied.limit);
+
     return {
       trending,
+      risingNiches,
+      topPerformers,
+      seasonal,
+      appliedFilters: applied,
       dataQuality: "verified",
       providerId: PROVIDER_ID,
       capabilities: CAPABILITIES,
@@ -628,3 +824,21 @@ export const manualImportProvider: DataProvider = {
     } satisfies ProviderTrendingResult;
   },
 };
+
+function emptyTrendingEnvelope(
+  applied: TrendingFilters,
+  notice: string,
+): ProviderTrendingResult {
+  return {
+    trending: [],
+    risingNiches: [],
+    topPerformers: [],
+    seasonal: [],
+    appliedFilters: applied,
+    dataQuality: "verified",
+    providerId: PROVIDER_ID,
+    capabilities: CAPABILITIES,
+    providerName: PROVIDER_NAME,
+    notice,
+  };
+}

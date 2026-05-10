@@ -39,6 +39,7 @@ const TYPE_LABELS: Record<string, string> = {
   saved: "Saved assets",
   imported: "Imported dataset",
   heatmap: "Heat map",
+  trending: "Trending",
 };
 
 function describeScope(row: ExportRow): string {
