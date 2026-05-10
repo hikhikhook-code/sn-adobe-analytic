@@ -117,25 +117,33 @@ export function searchDedupKey(args: {
  * when no new dedup key is seen for a while.
  */
 export function seenRecently(key: string, now: number = Date.now()): boolean {
-  // Prune expired entries. We iterate the whole map (no early break)
+  // Prune expired entries. We walk the whole map (no early exit)
   // because re-setting an existing key does NOT change its insertion
   // order in JS Maps — so a fresh entry written AFTER an older,
-  // now-expired entry still sits earlier in iteration order. Breaking
+  // now-expired entry still sits earlier in iteration order. Exiting
   // on the first non-expired entry would strand that older, expired
   // one. The cache is capped at MAX_ENTRIES so this stays O(cap).
+  //
+  // Uses `.forEach` / `Array.from(cache.keys())` rather than
+  // `for (... of cache)` because the project's tsconfig.json doesn't
+  // set a `target` and therefore defaults to ES5, which rejects direct
+  // iteration over a `Map` / `MapIterator` without `downlevelIteration`
+  // (`TS2802`). Behaviour is identical in both cases.
   const cutoff = now - DEDUP_TTL_MS;
-  for (const [k, ts] of cache) {
-    if (ts < cutoff) {
-      cache.delete(k);
-    }
+  const expired: string[] = [];
+  cache.forEach((ts, k) => {
+    if (ts < cutoff) expired.push(k);
+  });
+  for (let i = 0; i < expired.length; i += 1) {
+    cache.delete(expired[i]);
   }
   if (cache.size > MAX_ENTRIES) {
     const excess = cache.size - MAX_ENTRIES;
-    let i = 0;
-    for (const k of cache.keys()) {
-      if (i >= excess) break;
-      cache.delete(k);
-      i += 1;
+    // Array.from snapshots in insertion order so we evict the oldest
+    // entries first, matching the prior behaviour.
+    const oldest = Array.from(cache.keys()).slice(0, excess);
+    for (let i = 0; i < oldest.length; i += 1) {
+      cache.delete(oldest[i]);
     }
   }
 
