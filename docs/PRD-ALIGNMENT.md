@@ -106,7 +106,7 @@ Status legend:
 | 5.3 | Niche detail drilldown — top assets, related keywords, content-type breakdown | **Implemented** (mock + manual) / **Unsupported** (official) | Clicking a heat-map tile opens a Radix dialog drawer that calls `/api/heatmap?niche=<keyword>` to fetch a single-tile detail response. Top-8 assets sorted by downloads then performance, related keywords surfaced from co-occurrence in the same scope, content-type breakdown rendered as a percentage bar. |
 | 5.3 | Opportunity Finder — "Best Opportunities" section | **Implemented** (mock + manual) | Surfaces top niches sorted by opportunity score, filtered to competition ≤ 60 (with a graceful fallback to top-by-opportunity when strict filter yields nothing). Each row shows the data-quality badge so the user sees `Demo Data` / `Verified` consistently. |
 | 5.3 | Heat Map CSV export — niche list + niche detail | **Implemented** | Dedicated `/api/heatmap/export` endpoint produces either a single-row-per-niche "list" CSV or a multi-section "detail" CSV (overview + top assets + related keywords + content-type breakdown). Honors `metricsAvailable` and `capabilities.downloadsAvailable` so unavailable cells render `Unavailable` rather than fake `0`. Records an `ExportHistory` row with `type = "heatmap"`, the active dataset scope, and the applied filters. |
-| 5.4 | **Dashboard** — quick stats, recent searches, saved preview, search-usage progress | **Implemented** (mock + manual) / **Partial** (official) | `/api/dashboard` returns three concerns: (1) account-wide activity counters from the DB (searches today, saved assets, exports made, tracked contributors, imported assets) — always truthful regardless of provider; (2) provider-derived analytics rollup via `runDashboard()` (total downloads, average performance score, content-type breakdown, top performers, keyword highlights, trending widget) with per-metric `*Available` companion flags; (3) recent search history + saved-assets preview rows tagged with the active provider's data quality. Mock synthesizes a demo portfolio from `TRENDING_KEYWORDS` and tags every figure `Demo Data`. Manual aggregates the user's imports under the active dataset scope and tags figures `Verified` (downloads gated on `metricsAvailable`). Official returns an honestly-labeled response with every `*Available: false` and a notice — the UI must render `Unavailable` rather than fake zeros. See §8. |
+| 5.4 | **Dashboard** — quick stats, recent searches, saved preview, search-usage progress | **Implemented** (mock + manual) / **Partial** (official) | **UI completed in PR #14.** `/api/dashboard` returns three concerns: (1) account-wide activity counters from the DB (searches today, saved assets, exports made, tracked contributors, imported assets) — always truthful regardless of provider; (2) provider-derived analytics rollup via `runDashboard()` (total downloads, average performance score, content-type breakdown, top performers, keyword highlights, trending widget) with per-metric `*Available` companion flags; (3) recent search history + saved-assets preview rows tagged with the active provider's data quality. Mock synthesizes a demo portfolio from `TRENDING_KEYWORDS` and tags every figure `Demo Data`. Manual aggregates the user's imports under the active dataset scope and tags figures `Verified` (downloads gated on `metricsAvailable`). Official returns an honestly-labeled response with every `*Available: false` and a notice — the UI renders `Unavailable` rather than fake zeros. The `/dashboard` page now renders quick-stats cards, a performance-analytics section, saved-assets preview, recent-searches widget, trending-keywords widget, a plan-usage preview card, and quick actions. See §8 and §9. |
 | 5.4 | Trending keywords on dashboard | **Implemented** (mock + manual) / **Unavailable** (official) | Backed by `runDashboard().trendingKeywords` (top 8 by recent volume, derived locally from imports for manual; canned demo for mock). The `/dashboard` page additionally fetches `/api/search/trending` for the larger trending widget. |
 | 5.5 | **Similar Image Search** | **Implemented** (mock + manual, metadata proxy) / **Unsupported** (official) | `/search` shows a "Search by image" panel (toggle in the search bar) that accepts an image upload, an image URL, or a free-text hint. POST `/api/search/similar` runs the chosen provider and returns the same result shape as keyword search, plus a `similarityScore` (0–100) and a per-row `similarityAvailable` flag. Mock provider returns demo similar-image results ranked by token overlap (`Demo Data` envelope). Manual provider ranks the user's imported assets by metadata-similarity proxy — title-token Jaccard, keyword overlap, category/content-type match, plus a 100-point boost when the URL exactly matches `adobeStockUrl`/`thumbnailUrl`. Manual responses are tagged `Estimated`, never `Verified`, because the *ranking* is a metadata heuristic — not real visual AI. Official provider returns an empty result with a clear notice ("not available from this public-metadata source") — no scraping, no internal Adobe APIs, no proxy rotation. Result cards reuse the existing UI (favorites work; selection works) plus a Similarity tile. CSV export sends `type = "similar"` to `/api/export`, which adds a `Similarity Score` column and records an export-history row. |
 | 5.5 | Similar Image Search — Find similar from a card | **Implemented** | Every keyword-search result card now has an active "Find similar" button (replaces the previous "Coming Soon" stub). Clicking it opens the Similar Image Search panel, seeds the URL field with the asset's Adobe Stock URL (or thumbnail), and runs the metadata-similarity ranking. |
@@ -370,16 +370,87 @@ follows the same routing rules — see §1 “Selection order.”
 - `/api/dashboard` returns activity counters + analytics rollup +
   recent searches + saved-assets preview in one response.
 
-### What’s deferred to the next Dashboard UI PR
+### What’s deferred to future Dashboard work
 
-- Rendering the new `analytics`, `savedAssetsPreview`, and
-  `provider` payload in the dashboard page — the existing UI continues
-  to consume the back-compat counters and recent-searches list, but the
-  new fields are unused for now.
-- A dedicated saved-assets preview card on the dashboard.
-- Per-metric data-quality badges on each stat card (currently a single
-  page-level banner is rendered).
-- Performance-analytics widgets (top performers, content breakdown
-  chart, keyword highlights) — backend ready, UI deferred.
-- Per-search provider snapshot in `recentSearches` (we don’t persist the
-  active provider on each `SearchHistory` row yet).
+See §9 for the PR #14 Dashboard UI status. Items still outstanding
+after PR #14:
+
+- Persisting the active provider on each `SearchHistory` row so the
+  recent-searches widget can show a per-row provider badge (today we
+  show the current provider in the card header only).
+- Delta-since-save on each saved-asset preview row (depends on the
+  Saved Collections work in a future PR).
+- Plan gating (Stripe / PayPal / Cryptomus checkout + daily search
+  limit enforcement) — the plan-usage card is rendered as a preview
+  until gating lands.
+
+---
+
+## 9. Dashboard UI — status by widget (PR #14)
+
+PR #14 wires the full PR #13 backend response into `/dashboard`. The
+dashboard page now reads entirely from `/api/dashboard` and refreshes
+automatically when the user switches datasets via the top-bar selector
+(`ACTIVE_DATASET_CHANGED_EVENT`). No widget renders hardcoded placeholder
+numbers; every figure either comes from the API response or renders an
+honest `Unavailable` state via `UnavailableCardState`.
+
+### Widget matrix
+
+| Widget | Source field | Mock (Demo Data) | Manual (Verified) | Official (Public Metadata / Unset) |
+| --- | --- | --- | --- | --- |
+| **Data-source banner** | `datasetScope` + `provider.dataQuality` | "Using demo data" | "Using all imported datasets" or "Using dataset: <name>" | honest banner with provider name + quality chip |
+| **Quick stats — Searches today** | `searchesToday` | signed in: DB-backed; guest: 0 | signed in: DB-backed | signed in: DB-backed |
+| **Quick stats — Saved assets** | `savedAssets` | DB-backed | DB-backed | DB-backed |
+| **Quick stats — Exports made** | `exportsMade` | DB-backed | DB-backed | DB-backed |
+| **Quick stats — Tracked contributors** | `trackedContributors` | DB-backed (distinct contributor names on favorites) | DB-backed | DB-backed |
+| **Quick stats — Imported assets** | `importedAssets` | 0 (demo scope does not mix with imports) | scoped count | scoped count |
+| **Quick stats — Dataset scope tile** | `datasetScope` + `provider.name` | "Demo data · Mock data provider" | "<dataset name>" or "All imported datasets" | "User imported data" / "Public metadata" label |
+| **Performance — Total downloads** | `analytics.totalDownloads` + `*Available` | demo figure, `Demo Data` badge | verified figure, `Verified` badge | **Unavailable** card |
+| **Performance — Avg performance score** | `analytics.averagePerformanceScore` + `*Available` | demo figure | verified mean over non-zero rows | **Unavailable** card |
+| **Performance — Assets in scope** | `analytics.importedAssets` + `*Available` | demo figure | scoped asset count | **Unavailable** card |
+| **Performance — Top performing assets** | `analytics.topPerformers` + `*Available` | 5 demo rows | 5 top-by-downloads then perf | **Unavailable** card |
+| **Performance — Content type breakdown** | `analytics.contentBreakdown` + `*Available` | demo bars | verified percentage bars | **Unavailable** card |
+| **Performance — Keyword highlights** | `analytics.keywordHighlights` + `*Available` | demo chips | verified chips, per-row `metricsAvailable` gates the download counter | **Unavailable** card |
+| **Recent searches** | `recentSearches[]` | DB-backed; "Re-run" links to `/search?q=` | DB-backed | DB-backed |
+| **Saved assets preview** | `savedAssetsPreview[]` | DB-backed rows tagged `Demo Data` | DB-backed rows tagged `Verified` | DB-backed; empty for guests with CTA |
+| **Trending keywords** | `analytics.trendingKeywords` + `*Available` | canned demo list | derived 30d window | **Unavailable** card |
+| **Plan usage preview** | `/api/user/me` + `searchesToday` | signed in: shows plan + count; guests: CTA | same | same |
+| **Quick actions** | static routes | 5 buttons to `/search`, `/import`, `/portfolio`, `/trending`, `/export` | same | same |
+
+### What’s implemented in PR #14
+
+- `useDashboardData` hook that fetches `/api/dashboard` +
+  `/api/user/me` in parallel and refetches on dataset-selector change.
+- Six quick-stats tiles reflecting the full counter payload plus the
+  active dataset scope.
+- `<PerformanceAnalytics>` section with three metric blocks
+  (downloads, average performance, scope size) plus three panels (top
+  performers, content-type breakdown, keyword highlights). Every panel
+  honors the matching `*Available` flag.
+- `<SavedAssetsPreview>` grid with per-row `DataQualityBadge`,
+  `thumbnail`, `title`, `contributor`, `savedAt`, and an "Open" action
+  routing to `/saved`. Clean empty states for guests and
+  nothing-saved-yet.
+- `<RecentSearchesWidget>` with keyword, filter chips, result count,
+  relative time, and a one-click "Re-run" that re-dispatches the
+  keyword to `/search`.
+- `<TrendingKeywordsWidget>` scoped to the dashboard rollup (not the
+  full `/api/search/trending` payload).
+- `<PlanUsageCard>` — preview-only copy, honest "Plan limits not fully
+  enabled yet" banner, progress bar that visualizes today's activity.
+- `<QuickActionsCard>` — five buttons routing to real pages.
+- Loading (`DashboardSkeleton`), error (retryable card), and
+  provider-unavailable (`UnavailableCardState`) states.
+
+### What’s deliberately not in PR #14
+
+- Saved Collections, Auth completion (email verification / password
+  reset wiring), Pricing / SaaS gating checkout, Supabase migration,
+  and any new Adobe data integration — all deferred per the brief.
+- Persisting per-search provider snapshots on `SearchHistory` rows.
+- Real daily-search-limit enforcement (Plan Usage card remains a
+  preview).
+- Any scraping / proxy rotation / anti-bot bypass / fabricated Adobe
+  download counts — forbidden by the PRD's hard constraints.
+
