@@ -7,6 +7,7 @@ import {
   type Entitlements,
 } from "@/lib/entitlements";
 import { bootstrapOwnerIfEligible } from "@/lib/owner-bootstrap";
+import { IS_STRICT_RUNTIME } from "@/lib/env";
 
 /**
  * Server-side convenience that merges "who is the caller?" + "what's
@@ -161,6 +162,33 @@ export async function checkAndResetDailySearchBudget(
     ? null
     : (entitlements.maxSearchesPerDay as number);
 
+  // PR #19: dev / local-QA bypass.
+  //
+  // Outside strict production runtime (i.e. in `next dev`, tests, and
+  // the `next build` phase in CI) we treat every caller as effectively
+  // unlimited. The daily-search budget is a customer-plan gate, not a
+  // security boundary — gating local QA on OWNER_EMAILS means every
+  // fresh clone has to remember to set that env var before they can
+  // run more than 2 searches against demo data, which is friction
+  // nobody benefits from. In production the strict-runtime flag is
+  // true and the FREE/STARTER caps are enforced normally.
+  //
+  // `IS_STRICT_RUNTIME` comes from src/lib/env.ts and flips true only
+  // for real request-serving production — it's the same gate that
+  // decides whether to reject a placeholder NEXTAUTH_SECRET, so we're
+  // reusing a signal that's already audited + tested.
+  if (!IS_STRICT_RUNTIME) {
+    return {
+      allowed: true,
+      unlimited: true,
+      remaining: null,
+      used: user?.searchesUsedToday ?? 0,
+      limit: null,
+      plan: entitlements.plan,
+      isOwner: entitlements.isOwner,
+    };
+  }
+
   // Daily reset: compare the stored reset timestamp against "start of
   // today" UTC. Using UTC avoids a Daylight Savings edge case where a
   // local-time midnight could double-reset or skip a reset.
@@ -208,6 +236,11 @@ export async function checkAndResetDailySearchBudget(
  * tick. No-ops for owners / unlimited plans.
  */
 export async function recordDailySearch(userId: string): Promise<void> {
+  // Mirror checkAndResetDailySearchBudget: outside strict production
+  // runtime we don't gate searches, so there's no point incrementing
+  // the per-day counter. Keeps dev DB state clean across restarts
+  // and avoids a needless write on every search in `next dev`.
+  if (!IS_STRICT_RUNTIME) return;
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { email: true, plan: true, role: true },
