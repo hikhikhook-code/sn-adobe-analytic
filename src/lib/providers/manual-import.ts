@@ -5,6 +5,15 @@ import {
   calculatePerformanceScore,
 } from "@/lib/scoring";
 import { RESULTS_PER_PAGE } from "@/lib/constants";
+import {
+  DEFAULT_HEATMAP_FILTERS,
+  calculateOpportunityScore,
+  contentTypeBreakdown as buildContentTypeBreakdown,
+  filterAssetsByPeriod,
+  findRelatedKeywords,
+  matchesContentType,
+  sortNiches,
+} from "@/lib/heatmap";
 import type { SearchAsset } from "@/types/search";
 import type { DatasetScope } from "@/lib/dataset-scope";
 import {
@@ -13,6 +22,8 @@ import {
 } from "./types";
 import type {
   DataProvider,
+  HeatmapFilters,
+  HeatmapTile,
   ProviderCapabilities,
   ProviderContributorResult,
   ProviderHeatmapResult,
@@ -334,66 +345,231 @@ export const manualImportProvider: DataProvider = {
     } satisfies ProviderContributorResult;
   },
 
-  async heatmap(ctx) {
+  async heatmap(ctx, filters) {
     if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
     const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
     if (rows.length === 0) throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
-    const assets = rows.map(toSearchAsset);
-    // Group by keyword. Each keyword tile aggregates downloads + asset count
-    // + competition signal. Trend is heuristic: compare last 90d uploads vs
-    // the previous 90d.
+    const allAssets = rows.map(toSearchAsset);
+
+    const applied: HeatmapFilters = {
+      contentType: filters?.contentType ?? DEFAULT_HEATMAP_FILTERS.contentType,
+      period: filters?.period ?? DEFAULT_HEATMAP_FILTERS.period,
+      minDownloads:
+        filters?.minDownloads ?? DEFAULT_HEATMAP_FILTERS.minDownloads,
+      sort: filters?.sort ?? DEFAULT_HEATMAP_FILTERS.sort,
+      niche: filters?.niche?.trim() || undefined,
+    };
+
+    // Stage 1: cut by period + content type. Anything filtered here
+    // doesn't contribute to demand, competition, or trend.
+    const periodFiltered = filterAssetsByPeriod(allAssets, applied.period!);
+    const filtered = periodFiltered.filter((a) =>
+      matchesContentType(a, applied.contentType!),
+    );
+
+    if (filtered.length === 0) {
+      // Don't fall back to mock — the user has data, just nothing matches.
+      // Honest empty result so the UI can render "No matching niches".
+      return {
+        niches: [],
+        appliedFilters: applied,
+        dataQuality: "verified",
+        providerId: PROVIDER_ID,
+        capabilities: CAPABILITIES,
+        providerName: PROVIDER_NAME,
+        notice: "No imported assets match the current heat-map filters.",
+      } satisfies ProviderHeatmapResult;
+    }
+
+    // Stage 2: group by keyword. We compute trend over a 90/90 split of
+    // the *period-filtered* set. For "all time", that becomes "last 90d
+    // vs previous 90d" — the same heuristic the original implementation
+    // used. For "7d" / "30d", the window auto-shrinks proportionally so
+    // a niche that all happened in the last 7 days still produces a
+    // sensible trend signal.
     const now = Date.now();
     const day = 24 * 60 * 60 * 1000;
-    const byKeyword = new Map<
-      string,
-      { downloads: number; assets: number; recent: number; prev: number }
-    >();
-    for (const a of assets) {
+    const periodSpanDays =
+      applied.period === "7d"
+        ? 7
+        : applied.period === "30d"
+          ? 30
+          : applied.period === "90d"
+            ? 90
+            : applied.period === "1y"
+              ? 365
+              : 180; // "all" — use 90/90 split (180 day window)
+    const halfMs = (periodSpanDays / 2) * day;
+
+    interface NicheAccum {
+      keyword: string;
+      downloads: number;
+      assets: SearchAsset[];
+      recent: number;
+      prev: number;
+      perfSum: number;
+      perfCount: number;
+      hasRecent: boolean;
+      hasPrev: boolean;
+    }
+    const byKeyword = new Map<string, NicheAccum>();
+    for (const a of filtered) {
       const ts = new Date(a.uploadDate).getTime();
-      const isRecent = now - ts <= 90 * day;
-      const isPrev = now - ts <= 180 * day && now - ts > 90 * day;
+      const age = Number.isFinite(ts) ? now - ts : Number.POSITIVE_INFINITY;
+      const isRecent = age <= halfMs;
+      const isPrev = age <= halfMs * 2 && age > halfMs;
       for (const kw of a.keywords) {
-        const key = kw.toLowerCase();
+        const key = kw.toLowerCase().trim();
+        if (!key) continue;
         const cur = byKeyword.get(key) ?? {
+          keyword: key,
           downloads: 0,
-          assets: 0,
+          assets: [],
           recent: 0,
           prev: 0,
+          perfSum: 0,
+          perfCount: 0,
+          hasRecent: false,
+          hasPrev: false,
         };
         cur.downloads += a.downloads;
-        cur.assets += 1;
-        if (isRecent) cur.recent += a.downloads;
-        if (isPrev) cur.prev += a.downloads;
+        cur.assets.push(a);
+        if (a.performanceScore > 0 || a.metricsAvailable !== false) {
+          cur.perfSum += a.performanceScore;
+          cur.perfCount += 1;
+        }
+        if (isRecent) {
+          cur.recent += a.downloads;
+          cur.hasRecent = true;
+        }
+        if (isPrev) {
+          cur.prev += a.downloads;
+          cur.hasPrev = true;
+        }
         byKeyword.set(key, cur);
       }
     }
+
     if (byKeyword.size === 0) {
-      throw new ProviderNoDataError(
-        PROVIDER_ID,
-        "imported assets have no keywords",
-      );
+      return {
+        niches: [],
+        appliedFilters: applied,
+        dataQuality: "verified",
+        providerId: PROVIDER_ID,
+        capabilities: CAPABILITIES,
+        providerName: PROVIDER_NAME,
+        notice: "Imported assets have no keywords for the current filters.",
+      } satisfies ProviderHeatmapResult;
     }
-    const niches = Array.from(byKeyword.entries())
-      .map(([keyword, v]) => ({
-        keyword,
-        downloads: v.downloads,
-        assets: v.assets,
-        // Competition: ratio of total assets vs downloads, normalized 0..100.
-        // High asset count + low downloads ⇒ high competition.
-        competition: Math.min(
-          100,
-          Math.round((v.assets / Math.max(1, v.downloads / 100)) * 10),
-        ),
-        trend: (v.recent > v.prev
+
+    // Stage 3: minDownloads threshold + niche cap.
+    const thresholded = Array.from(byKeyword.values()).filter(
+      (v) => v.downloads >= (applied.minDownloads ?? 0),
+    );
+    if (thresholded.length === 0) {
+      return {
+        niches: [],
+        appliedFilters: applied,
+        dataQuality: "verified",
+        providerId: PROVIDER_ID,
+        capabilities: CAPABILITIES,
+        providerName: PROVIDER_NAME,
+        notice:
+          "No niches meet the minimum-downloads threshold for the current filters.",
+      } satisfies ProviderHeatmapResult;
+    }
+
+    const maxDownloads = Math.max(...thresholded.map((v) => v.downloads));
+
+    // Stage 4: build tiles. Cap to top 24 by downloads BEFORE applying
+    // the requested sort — the heatmap is a viewport, not a paginated
+    // list, and surfacing 5,000 tiny tiles helps no one.
+    const top = thresholded
+      .sort((a, b) => b.downloads - a.downloads)
+      .slice(0, 24);
+
+    function buildTile(v: NicheAccum): HeatmapTile {
+      const competition = Math.min(
+        100,
+        Math.round((v.assets.length / Math.max(1, v.downloads / 100)) * 10),
+      );
+      const trendAvailable = v.hasRecent || v.hasPrev;
+      const trend: HeatmapTile["trend"] = !trendAvailable
+        ? "stable"
+        : v.recent > v.prev
           ? "up"
           : v.recent < v.prev
             ? "down"
-            : "stable") as "up" | "down" | "stable",
-      }))
-      .sort((a, b) => b.downloads - a.downloads)
-      .slice(0, 24);
+            : "stable";
+      const avgPerformanceScore =
+        v.perfCount > 0 ? Math.round(v.perfSum / v.perfCount) : 0;
+      const opportunityScore = calculateOpportunityScore({
+        downloads: v.downloads,
+        competition,
+        avgPerformanceScore,
+        trend,
+        maxDownloads,
+      });
+      return {
+        keyword: v.keyword,
+        downloads: v.downloads,
+        assets: v.assets.length,
+        competition,
+        trend,
+        opportunityScore,
+        avgPerformanceScore,
+        contentTypeBreakdown: buildContentTypeBreakdown(v.assets),
+        relatedKeywords: [],
+        topAssets: [],
+        metricsAvailable: true,
+        trendAvailable,
+      };
+    }
+
+    // Niche detail mode: don't bother with the top-24 cap — we need the
+    // requested niche specifically, even if it's far down the list.
+    if (applied.niche) {
+      const target = applied.niche.toLowerCase();
+      const accum = byKeyword.get(target);
+      if (!accum || accum.downloads < (applied.minDownloads ?? 0)) {
+        return {
+          niches: [],
+          appliedFilters: applied,
+          detail: true,
+          dataQuality: "verified",
+          providerId: PROVIDER_ID,
+          capabilities: CAPABILITIES,
+          providerName: PROVIDER_NAME,
+          notice: `Niche "${applied.niche}" not found in the current filters.`,
+        } satisfies ProviderHeatmapResult;
+      }
+      const tile = buildTile(accum);
+      const detailTile: HeatmapTile = {
+        ...tile,
+        topAssets: [...accum.assets]
+          .sort(
+            (a, b) =>
+              b.downloads - a.downloads ||
+              b.performanceScore - a.performanceScore,
+          )
+          .slice(0, 8),
+        relatedKeywords: findRelatedKeywords(filtered, target, 8),
+      };
+      return {
+        niches: [detailTile],
+        appliedFilters: applied,
+        detail: true,
+        dataQuality: "verified",
+        providerId: PROVIDER_ID,
+        capabilities: CAPABILITIES,
+        providerName: PROVIDER_NAME,
+      } satisfies ProviderHeatmapResult;
+    }
+
+    const tiles: HeatmapTile[] = top.map(buildTile);
     return {
-      niches,
+      niches: sortNiches(tiles, applied.sort!),
+      appliedFilters: applied,
       dataQuality: "verified",
       providerId: PROVIDER_ID,
       capabilities: CAPABILITIES,

@@ -10,6 +10,7 @@ import {
 } from "./types";
 import type {
   DataProvider,
+  HeatmapFilters,
   ProviderContext,
   ProviderContributorResult,
   ProviderHeatmapResult,
@@ -195,8 +196,9 @@ export async function runContributor(
 
 export async function runHeatmap(
   ctx?: ProviderContext,
+  filters?: HeatmapFilters,
 ): Promise<ProviderHeatmapResult> {
-  return runProvider(ctx, (p) => p.heatmap(ctx));
+  return runProvider(ctx, (p) => p.heatmap(ctx, filters));
 }
 
 export async function runTrending(
@@ -209,6 +211,11 @@ export { mockProvider, officialAdobeProvider, manualImportProvider };
 export type {
   DataProvider,
   DataQuality,
+  HeatmapContentType,
+  HeatmapFilters,
+  HeatmapPeriod,
+  HeatmapSort,
+  HeatmapTile,
   ProviderCapabilities,
   ProviderContext,
   ProviderFeatureSupport,

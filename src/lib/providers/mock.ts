@@ -1,14 +1,26 @@
 import {
   HEATMAP_NICHES,
+  HEATMAP_NICHE_PRIMARY_TYPE,
   TRENDING_KEYWORDS,
   generateMockContributor,
   generateMockSearchResults,
 } from "@/lib/mock-data";
 import { calculateCompetitionLevel } from "@/lib/scoring";
 import { RESULTS_PER_PAGE } from "@/lib/constants";
+import {
+  DEFAULT_HEATMAP_FILTERS,
+  calculateOpportunityScore,
+  contentTypeBreakdown as buildContentTypeBreakdown,
+  filterAssetsByPeriod,
+  findRelatedKeywords,
+  matchesContentType,
+  sortNiches,
+} from "@/lib/heatmap";
 import type { SearchAsset } from "@/types/search";
 import type {
   DataProvider,
+  HeatmapFilters,
+  HeatmapTile,
   ProviderCapabilities,
   ProviderContributorResult,
   ProviderHeatmapResult,
@@ -135,9 +147,172 @@ export const mockProvider: DataProvider = {
     return out;
   },
 
-  async heatmap() {
+  async heatmap(_ctx, filters) {
+    const applied: HeatmapFilters = {
+      contentType: filters?.contentType ?? DEFAULT_HEATMAP_FILTERS.contentType,
+      period: filters?.period ?? DEFAULT_HEATMAP_FILTERS.period,
+      minDownloads:
+        filters?.minDownloads ?? DEFAULT_HEATMAP_FILTERS.minDownloads,
+      sort: filters?.sort ?? DEFAULT_HEATMAP_FILTERS.sort,
+      niche: filters?.niche?.trim() || undefined,
+    };
+
+    // Mock niches don't carry their own asset list; we synthesize it on
+    // demand so contentTypeBreakdown / topAssets / related keywords are
+    // realistic and respond to filters. Each call is deterministic by
+    // niche keyword (the mock generator is seeded).
+    const buildAssetsForNiche = (kw: string): SearchAsset[] => {
+      const { results } = generateMockSearchResults(kw, 1, 12);
+      return results.map((a) => ({ ...a, metricsAvailable: true }));
+    };
+
+    // Filter the niche list itself by the (mock-assigned) primary content
+    // type and minDownloads. Period only meaningfully filters topAssets in
+    // detail mode — the static mock niche list has no per-tile dates.
+    const filteredNiches = HEATMAP_NICHES.filter((n) => {
+      if (applied.minDownloads && n.downloads < applied.minDownloads) {
+        return false;
+      }
+      if (applied.contentType && applied.contentType !== "all") {
+        const primary = HEATMAP_NICHE_PRIMARY_TYPE[n.keyword] ?? "photo";
+        if (applied.contentType === "other") {
+          return ![
+            "photo",
+            "illustration",
+            "vector",
+            "video",
+            "template",
+            "3d",
+          ].includes(primary);
+        }
+        return primary === applied.contentType;
+      }
+      return true;
+    });
+
+    // Niche detail mode: pull the requested niche even if min-downloads
+    // would have hidden it (the user explicitly clicked it). Still respect
+    // the period filter when computing topAssets so the drilldown reflects
+    // "top performers in the last N days".
+    if (applied.niche) {
+      const target = applied.niche.toLowerCase();
+      const niche = HEATMAP_NICHES.find((n) => n.keyword === target);
+      if (!niche) {
+        return {
+          niches: [],
+          appliedFilters: applied,
+          detail: true,
+          dataQuality: "demo",
+          providerName: PROVIDER_NAME,
+          providerId: PROVIDER_ID,
+          capabilities: CAPABILITIES,
+          notice: `Niche "${applied.niche}" is not in the demo data set.`,
+        } satisfies ProviderHeatmapResult;
+      }
+      const synthAssets = buildAssetsForNiche(niche.keyword);
+      const periodAssets = filterAssetsByPeriod(
+        synthAssets,
+        applied.period!,
+      ).filter((a) => matchesContentType(a, applied.contentType!));
+      const avgPerf =
+        periodAssets.length > 0
+          ? Math.round(
+              periodAssets.reduce((s, a) => s + a.performanceScore, 0) /
+                periodAssets.length,
+            )
+          : 0;
+      const maxDownloadsAll = Math.max(
+        ...HEATMAP_NICHES.map((x) => x.downloads),
+        1,
+      );
+      const opportunityScore = calculateOpportunityScore({
+        downloads: niche.downloads,
+        competition: niche.competition,
+        avgPerformanceScore: avgPerf,
+        trend: niche.trend,
+        maxDownloads: maxDownloadsAll,
+      });
+      const tile: HeatmapTile = {
+        keyword: niche.keyword,
+        downloads: niche.downloads,
+        assets: niche.assets,
+        competition: niche.competition,
+        trend: niche.trend,
+        opportunityScore,
+        avgPerformanceScore: avgPerf,
+        contentTypeBreakdown: buildContentTypeBreakdown(periodAssets),
+        relatedKeywords: findRelatedKeywords(periodAssets, niche.keyword, 8),
+        topAssets: [...periodAssets]
+          .sort((a, b) => b.downloads - a.downloads)
+          .slice(0, 8),
+        metricsAvailable: true,
+        trendAvailable: true,
+      };
+      return {
+        niches: [tile],
+        appliedFilters: applied,
+        detail: true,
+        dataQuality: "demo",
+        providerName: PROVIDER_NAME,
+        providerId: PROVIDER_ID,
+        capabilities: CAPABILITIES,
+      } satisfies ProviderHeatmapResult;
+    }
+
+    if (filteredNiches.length === 0) {
+      return {
+        niches: [],
+        appliedFilters: applied,
+        dataQuality: "demo",
+        providerName: PROVIDER_NAME,
+        providerId: PROVIDER_ID,
+        capabilities: CAPABILITIES,
+        notice:
+          "No demo niches match the current filters. Try widening the content type or lowering the minimum downloads.",
+      } satisfies ProviderHeatmapResult;
+    }
+
+    const maxDownloads = Math.max(
+      ...filteredNiches.map((n) => n.downloads),
+      1,
+    );
+
+    const tiles: HeatmapTile[] = filteredNiches.map((n) => {
+      // Lightweight breakdown: synthesize a small sample so the demo
+      // looks plausible. Avoids running the full mock generator on the
+      // grid — detail mode does that.
+      const sample = generateMockSearchResults(n.keyword, 1, 6).results;
+      const avgPerf =
+        sample.length > 0
+          ? Math.round(
+              sample.reduce((s, a) => s + a.performanceScore, 0) / sample.length,
+            )
+          : 0;
+      return {
+        keyword: n.keyword,
+        downloads: n.downloads,
+        assets: n.assets,
+        competition: n.competition,
+        trend: n.trend,
+        opportunityScore: calculateOpportunityScore({
+          downloads: n.downloads,
+          competition: n.competition,
+          avgPerformanceScore: avgPerf,
+          trend: n.trend,
+          maxDownloads,
+        }),
+        avgPerformanceScore: avgPerf,
+        contentTypeBreakdown: buildContentTypeBreakdown(sample),
+        relatedKeywords: [],
+        topAssets: [],
+        metricsAvailable: true,
+        trendAvailable: true,
+      };
+    });
+
     return {
-      niches: HEATMAP_NICHES,
+      niches: sortNiches(tiles, applied.sort!),
+      appliedFilters: applied,
       dataQuality: "demo",
       providerName: PROVIDER_NAME,
       providerId: PROVIDER_ID,

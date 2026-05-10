@@ -131,16 +131,107 @@ export interface ProviderContributorResult extends ProviderResultEnvelope {
   assets: SearchAsset[];
 }
 
+/**
+ * PRD §5.3 Heat Map filters. All values are honored by the provider —
+ * no UI-only filtering. Defaults are applied server-side so the
+ * `appliedFilters` echo always shows what actually ran.
+ */
+export type HeatmapPeriod = "7d" | "30d" | "90d" | "1y" | "all";
+
+/**
+ * Sort dimensions for the niche grid. Mirrors the PRD's four signals.
+ * `opportunity` is the default — it surfaces high-demand / low-competition
+ * niches first, which is the page's whole reason for existing.
+ */
+export type HeatmapSort = "opportunity" | "demand" | "competition" | "trend";
+
+/**
+ * Heatmap content-type filter. Same vocabulary as `SearchAsset.contentType`
+ * plus an explicit `"all"` (default) and `"other"` bucket so the UI can
+ * show everything that doesn't match a known category.
+ */
+export type HeatmapContentType =
+  | "all"
+  | "photo"
+  | "illustration"
+  | "vector"
+  | "video"
+  | "template"
+  | "3d"
+  | "other";
+
+export interface HeatmapFilters {
+  contentType?: HeatmapContentType;
+  period?: HeatmapPeriod;
+  /** Minimum downloads (or imported demand signal) for a niche to qualify. */
+  minDownloads?: number;
+  sort?: HeatmapSort;
+  /**
+   * When set, the provider returns a single-tile detail response with
+   * `topAssets` + `relatedKeywords` populated. Used by the niche detail
+   * drawer.
+   */
+  niche?: string;
+}
+
 export interface HeatmapTile {
   keyword: string;
+  /** Total downloads for this niche across the matching asset set. */
   downloads: number;
+  /** Total asset count contributing to this niche. */
   assets: number;
+  /** Competition score 0..100 — higher = more crowded. */
   competition: number;
+  /** Direction of recent demand vs prior period. */
   trend: "up" | "down" | "stable";
+  /**
+   * Opportunity score 0..100 — higher = better opportunity. Combines demand,
+   * inverse competition, average performance, and trend. Always present so
+   * the UI never has to compute it client-side.
+   */
+  opportunityScore: number;
+  /**
+   * Average performance score 0..100 across niche assets. `0` when not
+   * available — pair with `metricsAvailable` to know whether to render `—`.
+   */
+  avgPerformanceScore: number;
+  /** Per-content-type asset count for the niche. */
+  contentTypeBreakdown: { contentType: string; count: number }[];
+  /**
+   * Top related keywords (co-occurring with this niche). Empty when this
+   * tile is part of a grid response — only populated for niche-detail mode.
+   */
+  relatedKeywords: string[];
+  /**
+   * Top-performing assets in this niche, ordered desc by downloads (or
+   * performance score when downloads aren't available). Empty in grid
+   * mode; populated in niche-detail mode.
+   */
+  topAssets: SearchAsset[];
+  /**
+   * `true` when downloads / avg performance are sourced from real user
+   * imports or demo data. `false` from public-metadata sources that don't
+   * expose verified numbers — UI must render `Unavailable`.
+   */
+  metricsAvailable: boolean;
+  /**
+   * `true` when the trend signal is reliable (≥ 1 datapoint in both the
+   * current and prior window). `false` when we can't compute it — UI
+   * should show `Unavailable` or hide the trend chip.
+   */
+  trendAvailable: boolean;
 }
 
 export interface ProviderHeatmapResult extends ProviderResultEnvelope {
   niches: HeatmapTile[];
+  /** Echo of the filters the server actually applied (after defaults). */
+  appliedFilters: HeatmapFilters;
+  /**
+   * `true` when the response represents a niche-detail drilldown rather
+   * than a grid. Lets the API layer skip metadata work the grid doesn't
+   * need.
+   */
+  detail?: boolean;
 }
 
 export interface TrendingKeyword {
@@ -171,7 +262,10 @@ export interface DataProvider {
     query: string,
     ctx?: ProviderContext,
   ): Promise<ProviderContributorResult>;
-  heatmap(ctx?: ProviderContext): Promise<ProviderHeatmapResult>;
+  heatmap(
+    ctx?: ProviderContext,
+    filters?: HeatmapFilters,
+  ): Promise<ProviderHeatmapResult>;
   trending(ctx?: ProviderContext): Promise<ProviderTrendingResult>;
 }
 

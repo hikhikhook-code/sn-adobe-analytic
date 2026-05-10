@@ -157,6 +157,27 @@ export const HEATMAP_NICHES = [
   { keyword: "remote work setup", downloads: 58_000, assets: 5_600, competition: 31, trend: "up" as const },
 ];
 
+/**
+ * Static "primary content type" tag for each demo niche. Lets the mock
+ * provider honor the heatmap content-type filter without inventing fake
+ * per-asset numbers \u2014 the niche itself self-identifies. Anything not
+ * listed here defaults to `"photo"` in the provider.
+ */
+export const HEATMAP_NICHE_PRIMARY_TYPE: Record<string, string> = {
+  "business meeting": "photo",
+  "ai illustration": "illustration",
+  "nature landscape": "photo",
+  "minimalist wallpaper": "vector",
+  "food photography": "photo",
+  "sustainable energy": "photo",
+  "fashion editorial": "photo",
+  "fitness lifestyle": "video",
+  "tech device": "3d",
+  "travel destination": "photo",
+  "abstract texture": "vector",
+  "remote work setup": "photo",
+};
+
 export interface MockContributor {
   id: string;
   name: string;
