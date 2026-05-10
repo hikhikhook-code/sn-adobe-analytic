@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { normalizeAdobeStockUrl } from "@/lib/adobe-stock-link";
 import {
   calculateCompetitionLevel,
   calculateDownloadsPerMonth,
@@ -140,7 +141,14 @@ function toSearchAsset(row: ImportedAssetRow): SearchAsset {
     isPremium: row.isPremium,
     isAiGenerated: row.isAiGenerated,
     keywords: parseJsonArray(row.keywordsJson),
-    adobeStockUrl: row.adobeStockUrl || "",
+    // PR #19: normalize `/id/` → `/uk/` on any provider URL that
+    // carries the misleading Indonesian locale prefix. User-imported
+    // CSVs sometimes copy-paste URLs from stock.adobe.com/id (the
+    // Indonesian domain that also happens to look like an "asset id"
+    // path), and we want every app-generated link to land on /uk/.
+    // Leaves real-asset detail URLs under other locales untouched.
+    adobeStockUrl:
+      normalizeAdobeStockUrl(row.adobeStockUrl) ?? row.adobeStockUrl ?? "",
     // The user uploaded these numbers; treat them as available even if they
     // happen to be zero.
     metricsAvailable: row.downloads != null,

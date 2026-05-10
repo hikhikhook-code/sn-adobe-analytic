@@ -13,6 +13,7 @@ import {
 import { DataQualityBadge } from "@/components/ui/data-quality";
 import { Badge } from "@/components/ui/badge";
 import { formatNumber } from "@/lib/utils";
+import { resolveAssetLink } from "@/lib/adobe-stock-link";
 import type { ProviderContributorResult } from "@/lib/providers/types";
 
 interface PortfolioBestSellersProps {
@@ -110,17 +111,28 @@ export function PortfolioBestSellers({ data, limit = 10 }: PortfolioBestSellersP
                       </span>
                     )}
                   </div>
-                  {asset.adobeStockUrl ? (
-                    <Link
-                      href={asset.adobeStockUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex-none text-muted-foreground hover:text-accent-blue"
-                      aria-label="Open on Adobe Stock"
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </Link>
-                  ) : null}
+                  {(() => {
+                    // Safe link routing: demo rows fall back to an
+                    // Adobe Stock keyword search, never a fake
+                    // /<id> detail page. See src/lib/adobe-stock-link.ts.
+                    const link = resolveAssetLink(asset, {
+                      dataQuality: data.dataQuality,
+                      providerId: data.providerId,
+                    });
+                    if (!link.href) return null;
+                    return (
+                      <Link
+                        href={link.href}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="flex-none text-muted-foreground hover:text-accent-blue"
+                        aria-label={link.label}
+                        title={link.reason}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </Link>
+                    );
+                  })()}
                 </li>
               );
             })}

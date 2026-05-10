@@ -8,6 +8,10 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataQualityBadge } from "@/components/ui/data-quality";
+import {
+  resolveAssetLink,
+  resolveContributorLink,
+} from "@/lib/adobe-stock-link";
 
 interface ResultCardProps {
   asset: SearchAsset;
@@ -20,6 +24,14 @@ interface ResultCardProps {
    * caller that hasn’t opted in still gets a clear label.
    */
   dataQuality?: DataQuality;
+  /**
+   * Provider id ("mock" | "manual" | "official"). Plumbed alongside
+   * `dataQuality` so the Adobe-Stock link resolver can tell real
+   * (verified / public_metadata) rows apart from mock rows that
+   * happen to carry a stock.adobe.com-shaped URL. See
+   * `src/lib/adobe-stock-link.ts`.
+   */
+  providerId?: string;
   /** Quality tier of the performance score, which is always estimated. */
   scoreQuality?: DataQuality;
   /**
@@ -46,6 +58,7 @@ export function ResultCard({
   selected,
   onToggleSelected,
   dataQuality = "demo",
+  providerId,
   scoreQuality,
   similarityScore,
   similarityAvailable,
@@ -61,6 +74,20 @@ export function ResultCard({
   // Render `—` + "Unavailable" instead of `0` so we never imply we have a
   // real Adobe download number.
   const hasMetrics = asset.metricsAvailable !== false;
+
+  // Safe link resolution. Mock / demo / estimated rows route to a
+  // keyword-search fallback (or a disabled state) so we never link
+  // to a fake stock.adobe.com/<id> detail page that 404s. See
+  // src/lib/adobe-stock-link.ts for the full policy.
+  const assetLink = resolveAssetLink(asset, {
+    dataQuality,
+    providerId,
+  });
+  // resolveContributorLink intentionally doesn't take a context bag:
+  // per src/lib/adobe-stock-link.ts we ALWAYS route contributor links
+  // through a UK keyword search, so the dataQuality / providerId bag
+  // that resolveAssetLink uses has nothing to decide on here.
+  const contributorLink = resolveContributorLink(asset);
 
   const keywordsShown = showAllKeywords ? asset.keywords : asset.keywords.slice(0, 6);
 
@@ -278,14 +305,24 @@ export function ResultCard({
         </div>
 
         <div className="flex items-center justify-between text-xs">
-          <a
-            href={`https://stock.adobe.com/contributor/${asset.contributorId}`}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="font-medium text-accent-blue hover:underline"
-          >
-            {asset.contributorName}
-          </a>
+          {contributorLink.href ? (
+            <a
+              href={contributorLink.href}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="font-medium text-accent-blue hover:underline"
+              title={contributorLink.reason}
+            >
+              {asset.contributorName}
+            </a>
+          ) : (
+            <span
+              className="font-medium text-muted-foreground"
+              title={contributorLink.reason}
+            >
+              {asset.contributorName || contributorLink.label}
+            </span>
+          )}
           {onFindSimilar ? (
             <button
               type="button"
@@ -345,16 +382,33 @@ export function ResultCard({
           </div>
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          asChild
-          className="justify-center"
-        >
-          <a href={asset.adobeStockUrl} target="_blank" rel="noreferrer noopener">
-            View on Adobe Stock <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-        </Button>
+        {assetLink.href ? (
+          <Button
+            variant="outline"
+            size="sm"
+            asChild
+            className="justify-center"
+          >
+            <a
+              href={assetLink.href}
+              target="_blank"
+              rel="noreferrer noopener"
+              title={assetLink.reason}
+            >
+              {assetLink.label} <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled
+            className="justify-center"
+            title={assetLink.reason}
+          >
+            {assetLink.label}
+          </Button>
+        )}
       </div>
     </Card>
   );

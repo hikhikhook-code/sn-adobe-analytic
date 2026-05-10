@@ -44,6 +44,8 @@ import {
   type CollectionFilter,
 } from "@/components/saved/collection-sidebar";
 import { DeltaChip } from "@/components/saved/delta-chip";
+import { resolveAssetLink } from "@/lib/adobe-stock-link";
+import type { DataQuality } from "@/types/search";
 
 type SavedTab = "assets" | "searches";
 
@@ -465,7 +467,11 @@ function AssetCard({
               isPremium: false,
               isAiGenerated: false,
               keywords: favorite.keywords,
-              adobeStockUrl: `https://stock.adobe.com/${favorite.assetId}`,
+              // Empty — Favorite rows don't persist the original asset
+              // URL, and toggling a favorite off doesn't need it. We
+              // never reconstruct a fake `stock.adobe.com/<id>` here
+              // (PR #19).
+              adobeStockUrl: "",
             })
           }
           className="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-md border border-border bg-white text-rose-500 shadow-sm hover:text-rose-600"
@@ -510,15 +516,47 @@ function AssetCard({
         />
 
         <div className="mt-auto flex items-center justify-between text-xs">
-          <a
-            href={`https://stock.adobe.com/${favorite.assetId}`}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="inline-flex items-center gap-1 font-medium text-accent-blue hover:underline"
-          >
-            <ExternalLink className="h-3 w-3" />
-            View on Adobe Stock
-          </a>
+          {(() => {
+            // Favorite rows don't carry the original adobeStockUrl.
+            // Route through the helper with the most recent tracked
+            // quality; when that's missing (demo / not-yet-tracked)
+            // the helper produces an Adobe Stock keyword-search
+            // fallback from the title instead of a fake detail URL.
+            // See PR #19.
+            const link = resolveAssetLink(
+              {
+                adobeStockUrl: "",
+                title: favorite.title,
+              },
+              {
+                dataQuality: (quality ?? "demo") as DataQuality,
+                providerId: favorite.lastCheckedProviderId ?? undefined,
+              },
+            );
+            if (!link.href) {
+              return (
+                <span
+                  className="inline-flex items-center gap-1 text-muted-foreground"
+                  title={link.reason}
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  {link.label}
+                </span>
+              );
+            }
+            return (
+              <a
+                href={link.href}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 font-medium text-accent-blue hover:underline"
+                title={link.reason}
+              >
+                <ExternalLink className="h-3 w-3" />
+                {link.label}
+              </a>
+            );
+          })()}
           <DataQualityBadge level={quality ?? "demo"} size="xs" />
         </div>
       </div>

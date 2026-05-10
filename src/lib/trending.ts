@@ -9,6 +9,7 @@
  *   - `/api/search/trending` normalizes URL params once, server-side.
  *   - Trending CSV export and the UI render the exact same numbers.
  */
+import { csvWithBom, CSV_CRLF } from "@/lib/csv";
 import type {
   ProviderTrendingResult,
   RisingNiche,
@@ -378,5 +379,5 @@ export function trendingToCsv(result: ProviderTrendingResult): string {
     );
   }
 
-  return out.join("\n");
+  return csvWithBom(out.join(CSV_CRLF));
 }

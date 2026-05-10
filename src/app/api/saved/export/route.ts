@@ -5,6 +5,8 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { parseJsonArray } from "@/lib/utils";
 import { requireEntitlement } from "@/lib/entitlement-gate";
+import { csvWithBom, CSV_CRLF } from "@/lib/csv";
+import { ADOBE_STOCK_BASE_URL } from "@/lib/adobe-stock-link";
 
 /**
  * Multi-section CSV export of the user's Saved library.
@@ -180,10 +182,15 @@ export async function POST(req: Request) {
         f.collectionId ? (collectionNames.get(f.collectionId) ?? "") : "",
         parseJsonArray<string>(f.keywordsJson).join("; "),
         f.notes ?? "",
-        // We don't store the Adobe Stock URL on Favorite today — reconstruct
-        // the canonical URL shape so the CSV stays useful. Same pattern the
-        // /saved UI uses when toggling a favorite.
-        `https://stock.adobe.com/${f.assetId}`,
+        // PR #19: Favorite rows don't persist the original Adobe Stock
+        // URL, and reconstructing `stock.adobe.com/<assetId>` would
+        // produce a fake detail URL that 404s for demo rows. Export a
+        // safe UK keyword-search fallback on the saved title instead —
+        // the search page always exists and lets the user rediscover
+        // the asset without pretending we have a real URL.
+        f.title
+          ? `${ADOBE_STOCK_BASE_URL}/search?k=${encodeURIComponent(f.title)}`
+          : "",
         f.savedAt.toISOString(),
       ]
         .map(escape)
@@ -234,7 +241,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const csv = out.join("\n");
+  const csv = csvWithBom(out.join(CSV_CRLF));
 
   // Export history row. We don't carry a dataset scope through here —
   // saved items aren't tied to a specific dataset at save time (they

@@ -569,6 +569,7 @@ function SearchPageInner() {
                         selected={similarSelected.has(asset.id)}
                         onToggleSelected={toggleSimilarSelected}
                         dataQuality={similarData.dataQuality}
+                        providerId={similarData.providerId}
                         similarityScore={asset.similarityScore}
                         similarityAvailable={asset.similarityAvailable}
                       />
@@ -708,6 +709,7 @@ function SearchPageInner() {
                     selected={selected.has(asset.id)}
                     onToggleSelected={toggleSelected}
                     dataQuality={data.dataQuality}
+                    providerId={data.providerId}
                     onFindSimilar={handleFindSimilarFromCard}
                   />
                 ))}

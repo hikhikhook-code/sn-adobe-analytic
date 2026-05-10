@@ -122,7 +122,12 @@ export function generateMockSearchResults(
       isPremium,
       isAiGenerated: isAi,
       keywords: pickKeywords(keyword, localRng),
-      adobeStockUrl: `https://stock.adobe.com/${id}`,
+      // Demo rows intentionally ship an EMPTY adobeStockUrl. A
+      // synthetic 9-digit id would look real but 404 on stock.adobe.com,
+      // so the resolver in src/lib/adobe-stock-link.ts routes demo
+      // assets to a safe keyword-search fallback instead of a fake
+      // detail page. See PR #19.
+      adobeStockUrl: "",
     };
   });
 

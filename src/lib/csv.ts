@@ -7,6 +7,36 @@ import type {
 } from "@/lib/providers/types";
 import { describeHeatmapPeriod } from "@/lib/heatmap";
 
+/**
+ * UTF-8 byte-order mark. Excel (on Windows especially) uses this to
+ * detect that the file is UTF-8; without it, non-ASCII characters in
+ * titles / keywords / contributor names become mojibake. The three-byte
+ * sequence \uFEFF at the start of the string is the canonical BOM.
+ *
+ * Paired with `CSV_LINE_SEPARATOR = "\r\n"` — Excel on Windows refuses
+ * to parse bare-LF files cleanly and falls back to "everything in
+ * column A" for the header row, which is exactly the bug this PR
+ * fixes. Both changes together are what makes a UTF-8 CSV open
+ * correctly in Excel AND stay compatible with Numbers / LibreOffice /
+ * Google Sheets.
+ */
+const CSV_BOM = "\uFEFF";
+const CSV_LINE_SEPARATOR = "\r\n";
+
+/**
+ * Wrap a finished CSV body with the BOM. Used by every exporter in this
+ * module (and the callers can import `csvWithBom` to wrap their own
+ * hand-rolled exports like /api/saved/export and /api/trending/export).
+ * Idempotent — running it twice doesn't double the BOM.
+ */
+export function csvWithBom(body: string): string {
+  return body.startsWith(CSV_BOM) ? body : CSV_BOM + body;
+}
+
+/** Line separator for Excel-friendly CSVs. Exported for call sites that
+ *  build multi-section CSVs inline (e.g. /api/saved/export). */
+export const CSV_CRLF = CSV_LINE_SEPARATOR;
+
 const CSV_HEADERS = [
   "ID",
   "Title",
@@ -25,7 +55,10 @@ const CSV_HEADERS = [
 
 function escape(value: string | number | boolean): string {
   const s = String(value);
-  if (/[",\n]/.test(s)) {
+  // Quote any field that contains a comma, double-quote, CR, or LF.
+  // CR handling was a missing case before PR #19 — without it, a title
+  // containing a bare "\r" could split a row across lines in Excel.
+  if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;
@@ -54,7 +87,7 @@ export function assetsToCsv(assets: SearchAsset[]): string {
         .join(","),
     );
   }
-  return rows.join("\n");
+  return csvWithBom(rows.join(CSV_CRLF));
 }
 
 /**
@@ -96,7 +129,7 @@ export function similarAssetsToCsv(assets: SimilarAsset[]): string {
         .join(","),
     );
   }
-  return rows.join("\n");
+  return csvWithBom(rows.join(CSV_CRLF));
 }
 
 /**
@@ -221,7 +254,7 @@ export function portfolioToCsv(data: ProviderContributorResult): string {
     );
   }
 
-  return out.join("\n");
+  return csvWithBom(out.join(CSV_CRLF));
 }
 
 /**
@@ -315,7 +348,7 @@ export function heatmapToCsv(
           .join(","),
       );
     }
-    return out.join("\n");
+    return csvWithBom(out.join(CSV_CRLF));
   }
 
   // Detail mode — single niche. The caller is expected to have already
@@ -405,5 +438,5 @@ export function heatmapToCsv(
     out.push(["breakdown", c.contentType, c.count].map(escape).join(","));
   }
 
-  return out.join("\n");
+  return csvWithBom(out.join(CSV_CRLF));
 }
