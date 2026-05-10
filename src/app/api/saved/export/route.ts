@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { parseJsonArray } from "@/lib/utils";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 
 /**
  * Multi-section CSV export of the user's Saved library.
@@ -42,6 +43,12 @@ export async function POST(req: Request) {
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  // PRD §7: CSV export is Starter+ only. Owners bypass.
+  const gate = await requireEntitlement("canExportCsv", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
 
   const { searchParams } = new URL(req.url);
   const parsed = QuerySchema.safeParse({

@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { assetsToCsv, similarAssetsToCsv } from "@/lib/csv";
 import { parseDatasetScope } from "@/lib/dataset-scope";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 import type { SearchAsset, SimilarAsset } from "@/types/search";
 
 const AssetSchema = z.object({
@@ -76,6 +77,13 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  // PRD §7: CSV export is Starter+ only. Owners bypass. Unauthenticated
+  // callers are rejected up front — export-history rows require a user
+  // anyway, and we don't ship a guest-export surface.
+  const gate = await requireEntitlement("canExportCsv", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
   const {
     type,
     query,

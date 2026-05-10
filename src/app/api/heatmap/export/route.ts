@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { heatmapToCsv } from "@/lib/csv";
 import { parseDatasetScope } from "@/lib/dataset-scope";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 import type { ProviderHeatmapResult } from "@/lib/providers/types";
 
 /**
@@ -145,6 +146,12 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+
+  // PRD §7: CSV export is Starter+ only. Owners bypass.
+  const gate = await requireEntitlement("canExportCsv", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
 
   // Cast to the provider type to feed the CSV builder. Zod has already
   // validated the structural shape; the only extra constraint it can't

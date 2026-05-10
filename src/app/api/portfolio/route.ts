@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { runContributor } from "@/lib/providers";
 import { resolveDatasetScope } from "@/lib/dataset-scope";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 
 const PortfolioSchema = z.object({
   query: z.string().min(1).max(200),
@@ -23,6 +24,11 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  // PRD §7: Portfolio Tracker is Pro/Annual. Owners bypass.
+  const gate = await requireEntitlement("canUsePortfolioTracker", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
   // The portfolio page doesn't expose an inline scope picker; it always

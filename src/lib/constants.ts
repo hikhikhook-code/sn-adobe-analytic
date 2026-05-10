@@ -8,6 +8,7 @@ import {
   FileDown,
   Settings,
   Upload,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 
@@ -33,6 +34,7 @@ export const PRIMARY_NAV: NavItem[] = [
 ];
 
 export const SECONDARY_NAV: NavItem[] = [
+  { label: "Pricing", href: "/pricing", icon: Sparkles },
   { label: "Settings", href: "/settings", icon: Settings },
 ];
 

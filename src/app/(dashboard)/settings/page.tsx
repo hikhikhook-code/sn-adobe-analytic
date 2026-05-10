@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useSession, signOut } from "next-auth/react";
+import { ShieldCheck } from "lucide-react";
 import { TopBar } from "@/components/layout/topbar";
 import { PageHeader } from "@/components/layout/page-header";
 import {
@@ -14,6 +15,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import type { Entitlements } from "@/lib/entitlements";
 
 interface DeviceUsageResponse {
   plan: string;
@@ -22,10 +24,19 @@ interface DeviceUsageResponse {
   overLimit: boolean;
 }
 
+interface EntitlementsResponse {
+  signedIn: boolean;
+  plan: string | null;
+  searchesUsedToday: number;
+  searchResetAt: string | null;
+  entitlements: Entitlements;
+}
+
 export default function SettingsPage() {
   const { data: session, status } = useSession();
   const [devices, setDevices] = useState<DeviceUsageResponse | null>(null);
   const [devicesError, setDevicesError] = useState<string | null>(null);
+  const [ent, setEnt] = useState<EntitlementsResponse | null>(null);
 
   useEffect(() => {
     if (status !== "authenticated") return;
@@ -42,10 +53,26 @@ export default function SettingsPage() {
       .catch(() => {
         if (!cancelled) setDevicesError("Couldn't load device list.");
       });
+    fetch("/api/user/entitlements", { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const j: EntitlementsResponse = await res.json();
+        if (!cancelled) setEnt(j);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [status]);
+
+  const searchesUsed = ent?.searchesUsedToday ?? 0;
+  const maxSearches = ent?.entitlements.maxSearchesPerDay ?? 2;
+  const isUnlimited = maxSearches === "unlimited";
+  const searchesRemaining = isUnlimited
+    ? null
+    : Math.max(0, (maxSearches as number) - searchesUsed);
+  const isOwner = ent?.entitlements.isOwner ?? false;
+  const planLabel = ent?.entitlements.planLabel ?? devices?.plan ?? "Free";
 
   return (
     <>
@@ -82,9 +109,15 @@ export default function SettingsPage() {
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
                     Plan
                   </p>
-                  <Badge variant="secondary" className="mt-1">
-                    {devices?.plan ?? "Free"}
-                  </Badge>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">{planLabel}</Badge>
+                    {isOwner && (
+                      <Badge variant="success" className="gap-1">
+                        <ShieldCheck className="h-3 w-3" />
+                        Owner access
+                      </Badge>
+                    )}
+                  </div>
                 </div>
               </>
             ) : (
@@ -92,6 +125,61 @@ export default function SettingsPage() {
             )}
           </CardContent>
         </Card>
+
+        {session?.user && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Plan usage</CardTitle>
+              <CardDescription>
+                Per-day search budget for your{" "}
+                <span className="font-medium">{planLabel}</span> plan.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              {isOwner ? (
+                <p>
+                  <Badge variant="success" className="mr-2">
+                    Unlimited
+                  </Badge>
+                  Owner accounts bypass the daily-search budget.
+                </p>
+              ) : isUnlimited ? (
+                <p>
+                  <Badge variant="accent" className="mr-2">
+                    Unlimited
+                  </Badge>
+                  Searches today:{" "}
+                  <span className="font-medium">{searchesUsed}</span>
+                </p>
+              ) : (
+                <>
+                  <p>
+                    <span className="font-medium">
+                      {searchesUsed}
+                    </span>{" "}
+                    of{" "}
+                    <span className="font-medium">
+                      {maxSearches as number}
+                    </span>{" "}
+                    searches used today
+                    {searchesRemaining === 0 && (
+                      <Badge variant="warning" className="ml-2">
+                        Limit reached
+                      </Badge>
+                    )}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Counter resets at 00:00 UTC. Upgrade your plan for
+                    more searches per day.
+                  </p>
+                </>
+              )}
+              <Button asChild variant="outline">
+                <Link href="/pricing">View plans</Link>
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {session?.user && (
           <Card>

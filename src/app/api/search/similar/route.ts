@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { runSimilar } from "@/lib/providers";
 import { parseDatasetScope, resolveDatasetScope } from "@/lib/dataset-scope";
 import { extractQueryTokens } from "@/lib/similarity";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 
 const ScopeSchema = z
   .object({
@@ -77,6 +78,12 @@ export async function POST(req: Request) {
     );
   }
   const data = parsed.data;
+  // PRD §7: Similar Image Search is Starter+ only. Guests hit the gate too
+  // (they have no plan). Owners bypass automatically.
+  const gate = await requireEntitlement("canUseSimilarSearch", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
 

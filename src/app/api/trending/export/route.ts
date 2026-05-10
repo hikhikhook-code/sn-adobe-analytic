@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { trendingToCsv } from "@/lib/trending";
 import { parseDatasetScope } from "@/lib/dataset-scope";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 import type { ProviderTrendingResult } from "@/lib/providers/types";
 
 /**
@@ -143,6 +144,12 @@ export async function POST(req: Request) {
     datasetScope: rawScope,
     params,
   } = parsed.data;
+
+  // PRD §7: CSV export is Starter+ only. Owners bypass.
+  const gate = await requireEntitlement("canExportCsv", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
 
   const totalRows =
     data.trending.length +

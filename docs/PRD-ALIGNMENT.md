@@ -622,3 +622,143 @@ deferred so shipping them doesn't lock users out of their accounts.
 - 2FA / TOTP / WebAuthn.
 - Email verification flow (separate PR).
 - Pricing / SaaS gating (Phase 4).
+
+
+
+---
+
+## 12. Pricing / Plan gating — status by capability (PR #17)
+
+PR #17 ships the plan-gating foundation from PRD §7: a centralized
+entitlement helper, server-side feature gates on every download-bearing
+API route, an owner / whitelist tier for the operator, a `/pricing` page
+with the full plan comparison, and a per-day search budget that resets
+daily. Real payment integration is **deliberately out of scope** — the
+pricing page says so in an amber banner, and every `/pricing` CTA is
+disabled with "Coming soon" copy.
+
+### Plan × feature matrix
+
+| Capability | Free | Starter | Pro | Annual | Owner |
+| --- | --- | --- | --- | --- | --- |
+| Keyword search | 2 / day | 50 / day | Unlimited | Unlimited | Unlimited |
+| Similar Image Search | — | Yes | Yes | Yes | Yes |
+| Export CSV (every surface) | — | Yes | Yes | Yes | Yes |
+| Save & Track Favorites | — | Yes | Yes | Yes | Yes |
+| Portfolio Tracker | — | — | Yes | Yes | Yes |
+| Heat Map | — | — | Yes | Yes | Yes |
+| Trending Insights | — | — | Yes | Yes | Yes |
+| Performance Analytics (dashboard) | — | — | Yes | Yes | Yes |
+| Device limit | 1 | 1 | 3 | 5 | 99 |
+
+"Owner" is not a plan — it's a server-side whitelist (`OWNER_EMAILS`)
+that bypasses every gate regardless of the user's stored `plan` value.
+
+### Entitlement helper — `src/lib/entitlements.ts`
+
+Single source of truth. Client-safe (no bcrypt / Prisma / next-auth
+imports). Exports:
+
+- `entitlementsFor({ plan, email, ownerOverride? })` — returns an
+  `Entitlements` bundle with per-feature booleans, plan label, device
+  cap, and `maxSearchesPerDay` (number or `"unlimited"`).
+- `FEATURE_LABELS` + `FEATURE_DENIAL_REASONS` — copy for the
+  pricing page and the 402 denial toasts.
+- `normalizePlan()` — any unknown / malformed plan value falls back
+  to `"FREE"` so a typo never grants unlimited access.
+
+The DB-touching partner lives in `src/lib/entitlements-server.ts` and
+is what API routes import. It adds `getSessionEntitlements()`,
+`checkAndResetDailySearchBudget()`, and `recordDailySearch()` on top of
+the client-safe module.
+
+### Owner whitelist — `src/lib/owner.ts`
+
+- Reads `OWNER_EMAILS` (comma-separated) once at module load.
+- Case-insensitive email compare against the verified NextAuth session
+  email. Empty entries are skipped.
+- Server-only. The value is never sent to the client; the client learns
+  `isOwner: true/false` via `/api/user/entitlements` and that's it.
+- Documented in `.env.example` with a placeholder. Real emails go in
+  Vercel env vars or a local `.env`, never in git.
+
+### Server-side gates
+
+Every download-bearing or plan-gated route now calls
+`requireEntitlement(<feature>, { requireSignedIn: true })` before any
+provider work:
+
+| Route | Gate | Error semantics |
+| --- | --- | --- |
+| `POST /api/search` | Daily-search budget (`checkAndResetDailySearchBudget`) | 429 `daily_search_limit_reached` with `plan`, `limit`, `used`, `remaining` |
+| `POST /api/search/similar` | `canUseSimilarSearch` | 402 `plan_gate` |
+| `POST /api/portfolio` | `canUsePortfolioTracker` | 402 `plan_gate` |
+| `GET /api/heatmap` | `canUseHeatMap` | 402 `plan_gate` |
+| `GET /api/search/trending` | `canUseTrending` | 402 `plan_gate` |
+| `POST /api/saved/track` | `canUseSavedTracking` | 402 `plan_gate` |
+| `POST /api/export` | `canExportCsv` | 402 `plan_gate` |
+| `POST /api/portfolio/export` | `canExportCsv` | 402 `plan_gate` |
+| `POST /api/heatmap/export` | `canExportCsv` | 402 `plan_gate` |
+| `POST /api/trending/export` | `canExportCsv` | 402 `plan_gate` |
+| `POST /api/saved/export` | `canExportCsv` | 402 `plan_gate` |
+
+All gates return a **structured** 402 shape: `{ error: "plan_gate",
+feature, plan, isOwner, message }`. Clients can branch on `error` and
+show the `message` inline. Unauthenticated callers get a 401 with
+`error: "unauthorized"`.
+
+### Daily-search budget
+
+- `User.searchesUsedToday` increments on every successful
+  `POST /api/search` for plans with a numeric cap (Free=2, Starter=50).
+- `User.searchResetAt` tracks the last reset. On every budget check we
+  compare it against **00:00 UTC** today; if it's stale we reset the
+  counter to 0 before enforcing. UTC avoids DST edge cases.
+- Unlimited plans (Pro / Annual / Owner) never tick the counter and
+  `allowed: true` returns immediately.
+- Over-budget requests return **429** (not 402) with a `limit` /
+  `used` / `remaining` body so the UI can render an accurate progress.
+
+### Pricing page — `/pricing`
+
+Renders four PRD cards (Free / Starter / Pro / Annual) with feature
+checklists, per-day search budget, and device limit. Current plan is
+highlighted. Owners see a green "Owner access active" banner at the
+top. Every CTA is disabled with a "Coming soon" tooltip — we do not
+pretend to accept payment.
+
+### Settings — `/settings`
+
+New "Plan usage" card shows `{used} of {limit} searches used today`
+plus a "Limit reached" badge when the user hits their cap. Owner /
+whitelisted accounts show an emerald "Owner access" badge next to the
+plan name and an "Unlimited" pill on the usage card. Per-plan device
+limits (already shown in the devices card) now surface the plan label
+via `/api/user/entitlements` rather than re-deriving it from the raw
+user row.
+
+### Sidebar
+
+Secondary nav gains a **Pricing** link next to Settings so the plan
+comparison is always one click away.
+
+### Client API — `/api/user/entitlements`
+
+Returns `{ signedIn, plan, searchesUsedToday, searchResetAt,
+entitlements }`. `entitlements.isOwner` is the **only** owner-
+whitelist signal exposed to the browser; the `OWNER_EMAILS` list
+itself never leaves the server.
+
+### What PR #17 does NOT ship
+
+- No Stripe, PayPal, or Cryptomus integration. No checkout routes,
+  webhook handlers, invoice emails, or subscription lifecycle code.
+- No plan upgrades / downgrades from the UI. `User.plan` is a string
+  field that ops can change directly in the DB; the app respects
+  whatever value is there.
+- No hard device-limit enforcement (still deferred per PR #16's
+  rationale — shipping without a "sign out other device" UX is a
+  lockout risk).
+- No rate-limiting beyond the per-day search budget. The forgot-
+  password rate limit still belongs to the shared rate-limit
+  middleware PR.

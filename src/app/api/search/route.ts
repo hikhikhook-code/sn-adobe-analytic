@@ -5,6 +5,10 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { runSearch } from "@/lib/providers";
 import { parseDatasetScope, resolveDatasetScope } from "@/lib/dataset-scope";
+import {
+  checkAndResetDailySearchBudget,
+  recordDailySearch,
+} from "@/lib/entitlements-server";
 
 const ScopeSchema = z
   .object({
@@ -50,6 +54,28 @@ export async function POST(req: Request) {
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
 
+  // PRD §7 daily-search budget. We only enforce for signed-in users —
+  // anonymous callers already hit the guest-flow demo data path and
+  // never touch the per-user counter. Unlimited plans + owners bypass
+  // the gate entirely inside `checkAndResetDailySearchBudget`.
+  if (userId) {
+    const budget = await checkAndResetDailySearchBudget(userId);
+    if (!budget.allowed) {
+      return NextResponse.json(
+        {
+          error: "daily_search_limit_reached",
+          message:
+            "You've hit your daily search limit. Upgrade your plan for more searches.",
+          plan: budget.plan,
+          limit: budget.limit,
+          used: budget.used,
+          remaining: budget.remaining,
+        },
+        { status: 429 },
+      );
+    }
+  }
+
   const scopeInfo = await resolveDatasetScope(
     userId,
     parseDatasetScope(data.datasetScope),
@@ -73,6 +99,10 @@ export async function POST(req: Request) {
         },
       })
       .catch(() => {});
+    // Non-blocking: increment the per-day counter. recordDailySearch
+    // is a no-op for unlimited plans + owners so it's safe to always
+    // call after a successful search.
+    recordDailySearch(userId).catch(() => {});
   }
 
   return NextResponse.json({

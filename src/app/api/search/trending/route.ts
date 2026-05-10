@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { runTrending } from "@/lib/providers";
 import { resolveDatasetScope } from "@/lib/dataset-scope";
 import { parseTrendingFilters } from "@/lib/trending";
+import { requireEntitlement } from "@/lib/entitlement-gate";
 
 /**
  * GET /api/search/trending
@@ -24,6 +25,11 @@ import { parseTrendingFilters } from "@/lib/trending";
  * \u00a75.8 explicitly requires this for trending.
  */
 export async function GET(req: Request) {
+  // PRD §7: Trending Insights is Pro/Annual. Owners bypass.
+  const gate = await requireEntitlement("canUseTrending", {
+    requireSignedIn: true,
+  });
+  if (!gate.ok) return gate.response;
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;
   const scopeInfo = await resolveDatasetScope(userId);
