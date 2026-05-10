@@ -55,6 +55,7 @@ model User {
   importedDatasets ImportedDataset[]
   collections      Collection[]
   savedSearches    SavedSearch[]
+  passwordResetTokens PasswordResetToken[]
 }
 
 model Account {
@@ -95,10 +96,52 @@ model Device {
   id         String   @id @default(cuid())
   userId     String
   deviceName String
+  // Client-generated opaque id. Stored in the `sn-device-id` cookie so the
+  // same browser-profile is recognized as one device across tabs + across
+  // re-logins. Unique per row; collisions are avoided at insert time by
+  // upserting on (userId, deviceId) which the API layer enforces.
   deviceId   String   @unique
+  // User-agent fingerprint (first ~200 chars of the UA header). Best-effort
+  // only — never used as a security signal, only as a human-readable
+  // "Chrome on macOS" label on the device-management page.
+  userAgent  String?
+  // Rough geolocation hint, if available from the reverse proxy / CDN
+  // headers. Same caveat as `userAgent`: display-only.
+  ipHint     String?
   lastActive DateTime @default(now())
+  firstSeen  DateTime @default(now())
+  // Soft-revoke flag. Flipping this to false does not currently terminate
+  // an in-flight session (PR #16 is foundation only) but it's the hook a
+  // future hard-enforce PR will read to reject further requests.
   isActive   Boolean  @default(true)
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+  @@index([userId, lastActive])
+}
+
+/// One-time password-reset token. We never store the raw token — only a
+/// bcrypt hash of it — and we never log the raw token either. The plaintext
+/// is handed back to the user exactly once, embedded in the reset URL sent
+/// to their email (or, in local dev, returned in the JSON response so the
+/// developer can click through without configuring a mailer).
+///
+/// Lookup is by hash comparison over all non-used, non-expired rows for the
+/// target user; this keeps the common case fast (most users have zero or
+/// one pending token) and dodges the "search by plaintext" pattern that
+/// some naive implementations fall into.
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  userId     String
+  // bcrypt(token). Lookups scan userId + non-expired + non-used rows and
+  // `bcrypt.compare` the presented plaintext against each candidate.
+  tokenHash  String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
 }
 
 model SearchHistory {

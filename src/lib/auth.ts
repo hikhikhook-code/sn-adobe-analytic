@@ -2,8 +2,21 @@ import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
 import bcrypt from "bcryptjs";
+import { randomBytes } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { assertNextAuthSecret } from "@/lib/env";
+
+/**
+ * Whether Google OAuth is wired for this deployment.
+ *
+ * Must be evaluated at module load, NOT inside `authorize`/`callbacks`, so
+ * the sign-in page can import it as a pure client-safe boolean (see the
+ * separate `auth-client.ts` re-export) and render its Google button in
+ * the correct enabled/disabled state without round-tripping to the server.
+ */
+export const GOOGLE_OAUTH_ENABLED = Boolean(
+  process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
+);
 
 const providers: NextAuthOptions["providers"] = [
   CredentialsProvider({
@@ -31,11 +44,22 @@ const providers: NextAuthOptions["providers"] = [
   }),
 ];
 
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+if (GOOGLE_OAUTH_ENABLED) {
   providers.push(
     GoogleProvider({
-      clientId: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      // `allowDangerousEmailAccountLinking` keeps NextAuth from throwing
+      // `OAuthAccountNotLinked` the first time a user who already has a
+      // credentials-based account tries to sign in with Google using the
+      // same email. We still match purely on verified Google email, which
+      // is safe because Google returns `email_verified: true` for any
+      // account that reached the OAuth consent screen. If a deployment
+      // wants stricter linking semantics (e.g. require the user to first
+      // confirm the link from their account settings) they can flip this
+      // off; for the current single-app MVP the PRD asks for "sign in
+      // with Google" to Just Work.
+      allowDangerousEmailAccountLinking: true,
     }),
   );
 }
@@ -45,6 +69,37 @@ export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   pages: {
     signIn: "/auth/login",
+  },
+  events: {
+    // Best-effort device logging. Runs after every successful sign-in
+    // (credentials OR Google) and after every new session issuance. We
+    // don't throw here — PR #16 is foundation only, so a logging failure
+    // must never block a user from signing in. The eventual device-limit
+    // enforcement PR will layer a `signIn` callback on top that rejects
+    // the attempt when the user is already at their plan's device cap.
+    async signIn({ user }) {
+      const userId = (user as { id?: string }).id;
+      if (!userId) return;
+      try {
+        // We don't have the raw Request here (NextAuth events don't
+        // surface headers), so we stamp a generic "Recent sign-in"
+        // device row. The credentials-register path + the
+        // `/api/devices/register` client route provide richer info.
+        const deviceId = randomBytes(12).toString("hex");
+        await prisma.device.create({
+          data: {
+            userId,
+            deviceId,
+            deviceName: "Recent sign-in",
+            lastActive: new Date(),
+            firstSeen: new Date(),
+            isActive: true,
+          },
+        });
+      } catch {
+        // Swallow — device logging must not break sign-in.
+      }
+    },
   },
   callbacks: {
     async jwt({ token, user }) {

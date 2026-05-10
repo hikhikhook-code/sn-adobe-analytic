@@ -1,13 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 
 interface FormError {
   message: string;
@@ -15,10 +22,14 @@ interface FormError {
   action?: { href: string; label: string };
 }
 
-export default function RegisterPage() {
+function RegisterInner() {
   const router = useRouter();
+  const sp = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<FormError | null>(null);
+  // Allow the login page to prefill the registration email when someone
+  // tried to sign in to an account that doesn't exist.
+  const prefilledEmail = sp.get("email") ?? "";
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -109,9 +120,24 @@ export default function RegisterPage() {
     <Card>
       <CardHeader className="space-y-1 text-center">
         <CardTitle className="text-2xl">Create your account</CardTitle>
-        <CardDescription>Free to start. No credit card required.</CardDescription>
+        <CardDescription>
+          Free to start. No credit card required.
+        </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        <GoogleSignInButton callbackUrl="/dashboard" />
+
+        <div className="relative">
+          <div className="absolute inset-0 flex items-center">
+            <span className="w-full border-t border-border/60" />
+          </div>
+          <div className="relative flex justify-center text-xs uppercase">
+            <span className="bg-card px-2 text-muted-foreground">
+              Or sign up with email
+            </span>
+          </div>
+        </div>
+
         <form onSubmit={onSubmit} className="space-y-4" noValidate>
           <div className="space-y-2">
             <Label htmlFor="name">Name</Label>
@@ -125,6 +151,7 @@ export default function RegisterPage() {
               type="email"
               required
               autoComplete="email"
+              defaultValue={prefilledEmail}
             />
           </div>
           <div className="space-y-2">
@@ -163,13 +190,24 @@ export default function RegisterPage() {
           </Button>
         </form>
 
-        <p className="mt-6 text-center text-sm text-muted-foreground">
+        <p className="text-center text-sm text-muted-foreground">
           Already have an account?{" "}
-          <Link href="/auth/login" className="font-medium text-accent-blue hover:underline">
+          <Link
+            href="/auth/login"
+            className="font-medium text-accent-blue hover:underline"
+          >
             Sign in
           </Link>
         </p>
       </CardContent>
     </Card>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense fallback={null}>
+      <RegisterInner />
+    </Suspense>
   );
 }
