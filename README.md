@@ -76,9 +76,19 @@ niche heat maps, and export results to CSV.
     a bootstrap-only env var; once a user's email matches on login or
     register, their role is promoted to `OWNER` in the DB and survives
     even if the env var is later removed. See [*Owner / admin access*](#owner--admin-access) below.
+  - PR #22 — **Public Adobe Stock metadata scraper + cache foundation**.
+    The official / public provider can now pull real metadata (asset id,
+    thumbnail, title, Adobe Stock URL, contributor name/URL, content
+    type) from publicly visible Adobe Stock search pages via
+    `PUBLIC_SCRAPER_ENABLED=true`, cached in `CachedSearch` /
+    `CachedAsset` tables (24h / 7d TTL). Rate-limited, timed out,
+    retried once on transient failures, static user-agent, no proxy
+    rotation, no anti-bot bypass. Downloads / performance remain
+    `Unavailable` (public pages don't expose verified numbers). See
+    `docs/PRD-ALIGNMENT.md` §14 for the full spec.
 
-- **Phase 3+** (still deferred) — official Adobe data source, similar-image
-  search, pricing checkout.
+- **Phase 3+** (still deferred) — official Adobe signed-feed wiring,
+  similar-image search, pricing checkout.
 
 ## Tech stack
 

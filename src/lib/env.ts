@@ -158,12 +158,16 @@ export function assertNextAuthSecret(): string {
 // ---------------------------------------------------------------------------
 // DATA_PROVIDER
 // ---------------------------------------------------------------------------
-const KNOWN_PROVIDERS = ["mock", "official", "manual"] as const;
+const KNOWN_PROVIDERS = ["mock", "official", "public", "manual"] as const;
 export type DataProviderName = (typeof KNOWN_PROVIDERS)[number];
 
 function readDataProvider(): DataProviderName {
   const raw = (process.env.DATA_PROVIDER ?? "mock").toLowerCase().trim();
   if ((KNOWN_PROVIDERS as readonly string[]).includes(raw)) {
+    // `public` is the preferred public-metadata alias introduced in
+    // PR #22. We keep the `official` string mapped to the same
+    // provider instance (see `src/lib/providers/index.ts`) so existing
+    // deployments don't need an env change.
     return raw as DataProviderName;
   }
   warn(

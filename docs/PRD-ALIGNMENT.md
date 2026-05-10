@@ -886,3 +886,143 @@ The Profile card now shows:
   existing rows survive the `prisma db push` without data loss.
 - No changes to payment / checkout / plan gating behavior beyond
   plumbing the new `role` field through `entitlementsFor()`.
+
+
+---
+
+## 14. Public Adobe Stock metadata scraper + cache foundation (PR #22)
+
+PR #22 teaches the public-metadata provider to collect real metadata
+from publicly visible Adobe Stock search pages, caches the results,
+and standardizes on the `public` provider alias. None of it changes
+the existing `mock` / `manual` default behavior.
+
+### What's new
+
+- `src/lib/scraper/public-adobe-stock.ts` — Axios + Cheerio fetcher
+  for public Adobe Stock search HTML. Rate-limited, timed out,
+  retried once on transient failures, never touches private APIs.
+- `src/lib/scraper/cache.ts` — thin `read`/`write` helpers over the
+  new `CachedSearch` and `CachedAsset` Prisma tables.
+- `src/lib/providers/official-adobe.ts` — wired to both (a) the
+  HTTP boundary (`OFFICIAL_PROVIDER_BASE_URL`) and (b) the built-in
+  scraper (`PUBLIC_SCRAPER_ENABLED`), with a cache-first read path
+  and a graceful stale-cache fallback.
+- `DATA_PROVIDER=public` — a new alias that resolves to the same
+  provider instance as `DATA_PROVIDER=official`. Both accepted so
+  existing `.env` files don't need editing.
+- `DataSourceBanner` — dedicated "Public Adobe Stock metadata"
+  variant when the active response is tagged `public_metadata`,
+  making the source clear at a glance.
+
+### Supported fields (what the public scraper actually captures)
+
+From each parseable tile on the public search page:
+
+| Field | Source in public HTML | Notes |
+| --- | --- | --- |
+| `assetId` | `-<digits>.html` suffix of the asset anchor's href | Missing when Adobe's page doesn't expose the numeric id. |
+| `thumbnailUrl` | `<img src / data-src / data-lazy>` on the tile | |
+| `title` | `<img alt>` or `<a title>` on the tile | |
+| `adobeStockUrl` | the tile's primary `<a href>`, normalized via `normalizeAdobeStockUrl` | Locale rewritten to `/uk/`. |
+| `contributorName` + `contributorUrl` | `<a href="/contributor/…">` if visible in the tile | Per `adobe-stock-link.ts`, the UI still routes contributor clicks through a keyword-search fallback (never `/contributor/<id>`). |
+| `contentType` | regex heuristic over the asset href + thumbnail URL | Maps to `photo / illustration / vector / video / template / 3d`. |
+| `isPremium` / `isAiGenerated` | literal "Premium" / "AI generated" text inside the tile | Cautious — only flagged when the text is present. |
+| `keywords` | scraped where visible; often empty on the search grid | |
+| `totalResults` | visible "N results" string on the page | Best-effort; display-only. |
+
+### Fields that are NEVER available from the public scraper
+
+These fields exist in the PRD result shape but are not exposed on
+public Adobe Stock pages. The provider leaves them empty and sets
+`metricsAvailable: false` so the UI renders `Unavailable`:
+
+- `downloads`
+- `performanceScore`
+- `downloadsPerMonth`
+- Verified monthly trend
+- Sales / revenue
+
+No value is ever fabricated for these.
+
+### Cache behavior
+
+Two Prisma tables back the cache:
+
+| Table | Keyed by | TTL | Purpose |
+| --- | --- | --- | --- |
+| `CachedSearch` | `(source, keyword, sort, contentType, aiFilter, page)` | ~24h | Stores the exact `ProviderSearchResult` envelope per search. |
+| `CachedAsset` | `(source, assetId)` | ~7d | Reserved for asset-detail drilldowns; same `SearchAsset` payload shape. |
+
+`source` distinguishes rows produced by different upstreams
+(`public_scrape` = built-in scraper; `official_api` = configured
+HTTP boundary) so they can't clobber each other.
+
+Read path for `/search` under `DATA_PROVIDER=public`:
+
+1. Read `CachedSearch` by key.
+2. Fresh hit (`expiresAt > now`) → return cached payload, stamp a
+   "cached Nm/Nh/Nd old" suffix onto the notice.
+3. Otherwise attempt live fetch (HTTP boundary if configured;
+   scraper otherwise).
+4. Live success → write cache, return payload.
+5. Live failure (blocked, timeout, network error, empty parse)
+   AND we have a stale cache row → return the stale payload with a
+   "Live fetch failed; showing cached results" notice.
+6. No cache, live failure or scraper disabled → return an honestly
+   empty envelope with a clear reason. The UI renders `Unavailable`
+   on every metric, never a fabricated `0`.
+
+### Safety limits
+
+Hard-coded in `src/lib/scraper/public-adobe-stock.ts`:
+
+- 1 second minimum between requests (per process).
+- 10 second request timeout.
+- At most one retry on transient network errors.
+- Static `User-Agent: SN-Adobe-Analytic/1.0 (+github repo URL)`.
+- Never follows redirects across hosts.
+- Never sends cookies / credentials.
+- Never attempts to retry on 4xx/5xx (respects bot challenges /
+  rate limits by backing off, never bypassing).
+- Off by default. Requires `PUBLIC_SCRAPER_ENABLED=true`.
+- In `NODE_ENV=production`, refuses to run unless
+  `PUBLIC_SCRAPER_ALLOW_PROD=true` is ALSO set (double opt-in).
+
+### Hard rules the scraper does NOT break
+
+- **No private / internal Adobe APIs.** The scraper fetches the
+  exact URL shape a browser would — `https://stock.adobe.com/uk/search?k=…`.
+- **No logged-in contributor dashboard scraping.** Only
+  unauthenticated public endpoints.
+- **No proxy rotation.** There's no knob for it and no code path.
+- **No user-agent evasion.** The UA is a single static identifier
+  naming the app and linking back to the repo.
+- **No captcha / anti-bot bypass.** HTTP 403 / 429 / 5xx responses
+  are surfaced as a structured "blocked" status; the provider
+  immediately falls back to cache or returns `Unavailable`.
+- **No fabricated download counts.** If the live fetch succeeds the
+  payload is the metadata we read; if it fails the UI sees
+  `Unavailable`, never zero-filled fake numbers.
+- **No secrets committed.** `OFFICIAL_PROVIDER_API_KEY` /
+  `PUBLIC_SCRAPER_ALLOW_PROD` are env-only and documented in
+  `.env.example` as placeholders.
+
+### Operator checklist
+
+To start using the public-metadata provider:
+
+1. `DATA_PROVIDER=public` (or `official` — same thing).
+2. Either:
+   - Configure `OFFICIAL_PROVIDER_BASE_URL` (+ optional
+     `OFFICIAL_PROVIDER_API_KEY`) to point at your own HTTP adapter,
+     OR
+   - Set `PUBLIC_SCRAPER_ENABLED=true` locally (and also
+     `PUBLIC_SCRAPER_ALLOW_PROD=true` on production deployments) to
+     let the built-in scraper talk to Adobe Stock directly.
+3. Run `prisma db push` (or a migration) so the new `CachedSearch`
+   / `CachedAsset` tables exist.
+
+Nothing else changes — the `mock` and `manual` providers keep
+behaving identically. Users on demo or imported data see no
+difference until they switch the env var.
