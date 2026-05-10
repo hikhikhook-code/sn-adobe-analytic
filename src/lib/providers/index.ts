@@ -18,6 +18,7 @@ import type {
   ProviderSearchRequest,
   ProviderSearchResult,
   ProviderTrendingResult,
+  TrendingFilters,
 } from "./types";
 
 const PROVIDERS: Record<string, DataProvider> = {
@@ -203,8 +204,9 @@ export async function runHeatmap(
 
 export async function runTrending(
   ctx?: ProviderContext,
+  filters?: TrendingFilters,
 ): Promise<ProviderTrendingResult> {
-  return runProvider(ctx, (p) => p.trending(ctx));
+  return runProvider(ctx, (p) => p.trending(ctx, filters));
 }
 
 export { mockProvider, officialAdobeProvider, manualImportProvider };
@@ -224,5 +226,13 @@ export type {
   ProviderContributorResult,
   ProviderHeatmapResult,
   ProviderTrendingResult,
+  RisingNiche,
+  SeasonalTrend,
+  TopPerformer,
+  TrendingContentType,
+  TrendingFilters,
+  TrendingKeyword,
+  TrendingPeriod,
+  TrendingSort,
 } from "./types";
 export { DATA_QUALITY_LABELS, DATA_QUALITY_DESCRIPTIONS } from "./types";

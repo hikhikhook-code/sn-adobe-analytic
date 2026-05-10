@@ -1,6 +1,7 @@
 import {
   HEATMAP_NICHES,
   HEATMAP_NICHE_PRIMARY_TYPE,
+  SEASONAL_TRENDS,
   TRENDING_KEYWORDS,
   generateMockContributor,
   generateMockSearchResults,
@@ -16,6 +17,12 @@ import {
   matchesContentType,
   sortNiches,
 } from "@/lib/heatmap";
+import {
+  DEFAULT_TRENDING_FILTERS,
+  matchesTrendingContentType,
+  seasonalStatus,
+  sortTrending,
+} from "@/lib/trending";
 import type { SearchAsset } from "@/types/search";
 import type {
   DataProvider,
@@ -27,6 +34,11 @@ import type {
   ProviderSearchRequest,
   ProviderSearchResult,
   ProviderTrendingResult,
+  RisingNiche,
+  SeasonalTrend,
+  TopPerformer,
+  TrendingFilters,
+  TrendingKeyword,
 } from "./types";
 
 const PROVIDER_ID = "mock";
@@ -320,9 +332,140 @@ export const mockProvider: DataProvider = {
     } satisfies ProviderHeatmapResult;
   },
 
-  async trending() {
+  async trending(_ctx, filters) {
+    const applied: TrendingFilters = {
+      period: filters?.period ?? DEFAULT_TRENDING_FILTERS.period,
+      contentType: filters?.contentType ?? DEFAULT_TRENDING_FILTERS.contentType,
+      minVolume: filters?.minVolume ?? DEFAULT_TRENDING_FILTERS.minVolume,
+      sort: filters?.sort ?? DEFAULT_TRENDING_FILTERS.sort,
+      limit: filters?.limit ?? DEFAULT_TRENDING_FILTERS.limit,
+    };
+
+    // Trending keywords. Filter by content-type tag + min volume server
+    // side, then sort + cap.
+    const filteredTrending: TrendingKeyword[] = TRENDING_KEYWORDS.filter(
+      (t) => {
+        if (
+          applied.contentType &&
+          applied.contentType !== "all" &&
+          !matchesTrendingContentType({ contentType: t.contentType }, applied.contentType)
+        ) {
+          return false;
+        }
+        if (applied.minVolume && t.volume < applied.minVolume) return false;
+        return true;
+      },
+    ).map((t) => ({
+      keyword: t.keyword,
+      volume: t.volume,
+      growth: t.growth,
+      metricsAvailable: true,
+    }));
+    const trending = sortTrending(filteredTrending, applied.sort!).slice(
+      0,
+      applied.limit,
+    );
+
+    // Rising niches — derive from heatmap niches with `trend === "up"`,
+    // honoring content-type + min-volume filters. growth is synthesized
+    // from competition (lower competition + up trend = stronger rise).
+    const risingNiches: RisingNiche[] = HEATMAP_NICHES.filter((n) => {
+      if (n.trend !== "up") return false;
+      if (applied.minVolume && n.downloads < applied.minVolume) return false;
+      if (applied.contentType && applied.contentType !== "all") {
+        const primary = HEATMAP_NICHE_PRIMARY_TYPE[n.keyword] ?? "photo";
+        if (
+          !matchesTrendingContentType(
+            { contentType: primary },
+            applied.contentType,
+          )
+        ) {
+          return false;
+        }
+      }
+      return true;
+    })
+      .map((n) => ({
+        keyword: n.keyword,
+        downloads: n.downloads,
+        assets: n.assets,
+        // Synthetic growth — demo data; the badge tells the user this is
+        // not a real Adobe Stock figure. Range ~25–75%.
+        growth: 25 + Math.round((100 - n.competition) * 0.5),
+        competition: n.competition,
+        metricsAvailable: true,
+      }))
+      .sort((a, b) =>
+        applied.sort === "volume" ? b.downloads - a.downloads : b.growth - a.growth,
+      )
+      .slice(0, applied.limit);
+
+    // Top performers this period — synthesize across the trending
+    // keywords (filter the underlying assets by content type + period
+    // first so the section honestly reflects the filters).
+    const period = applied.period!;
+    const day = 24 * 60 * 60 * 1000;
+    const cutoffMs =
+      period === "7d"
+        ? 7 * day
+        : period === "30d"
+          ? 30 * day
+          : period === "90d"
+            ? 90 * day
+            : 365 * day;
+    const now = Date.now();
+
+    const performerCandidates = trending
+      .slice(0, 6)
+      .flatMap((t) => generateMockSearchResults(t.keyword, 1, 6).results);
+    const topPerformers: TopPerformer[] = performerCandidates
+      .filter((a) => {
+        if (
+          applied.contentType &&
+          applied.contentType !== "all" &&
+          !matchesTrendingContentType(a, applied.contentType)
+        ) {
+          return false;
+        }
+        const ts = new Date(a.uploadDate).getTime();
+        if (Number.isNaN(ts) || ts === 0) return false;
+        return now - ts <= cutoffMs;
+      })
+      .map((a) => ({
+        asset: { ...a, metricsAvailable: true },
+        // Demo-derived: assume a constant fraction of the asset's lifetime
+        // downloads landed in the active period, scaled down for shorter
+        // windows. Tagged Demo Data globally.
+        recentDownloads: Math.max(
+          1,
+          Math.round(a.downloads * (cutoffMs / (90 * day))),
+        ),
+      }))
+      .sort((a, b) => b.recentDownloads - a.recentDownloads)
+      .slice(0, applied.limit);
+
+    // Seasonal trends — use static demo data; flag in_season /
+    // approaching / off_season relative to the current calendar month.
+    const seasonal: SeasonalTrend[] = SEASONAL_TRENDS.map((s) => ({
+      keyword: s.keyword,
+      peakMonth: s.peakMonth,
+      peakLift: s.peakLift,
+      status: seasonalStatus(s.peakMonth),
+      available: true,
+    }))
+      .sort((a, b) => {
+        const rank = (st: SeasonalTrend["status"]) =>
+          st === "in_season" ? 0 : st === "approaching" ? 1 : 2;
+        return rank(a.status) - rank(b.status) || b.peakLift - a.peakLift;
+      })
+      .slice(0, applied.limit);
+
     return {
-      trending: TRENDING_KEYWORDS,
+      trending,
+      risingNiches,
+      topPerformers,
+      seasonal,
+      appliedFilters: applied,
       dataQuality: "demo",
       providerName: PROVIDER_NAME,
       providerId: PROVIDER_ID,

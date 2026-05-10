@@ -234,14 +234,83 @@ export interface ProviderHeatmapResult extends ProviderResultEnvelope {
   detail?: boolean;
 }
 
+/**
+ * PRD §5.8 Trending filters. All values are honored by the provider — no
+ * UI-only filtering. Defaults are applied server-side so `appliedFilters`
+ * always echoes what actually ran.
+ */
+export type TrendingPeriod = "7d" | "30d" | "90d" | "1y";
+export type TrendingSort = "growth" | "volume";
+export type TrendingContentType =
+  | "all"
+  | "photo"
+  | "illustration"
+  | "vector"
+  | "video"
+  | "template"
+  | "3d"
+  | "other";
+
+export interface TrendingFilters {
+  period?: TrendingPeriod;
+  contentType?: TrendingContentType;
+  /** Minimum search volume / total downloads for a keyword to qualify. */
+  minVolume?: number;
+  sort?: TrendingSort;
+  /** Cap on items returned per section. Defaults to 12. */
+  limit?: number;
+}
+
 export interface TrendingKeyword {
   keyword: string;
+  /** Search-volume signal. Synthesized for mock; total downloads for manual. */
   volume: number;
+  /** Growth % current period vs previous. */
   growth: number;
+  /** `false` when the underlying figures are not derivable; UI must render
+   *  `Unavailable` rather than fake zeros. Defaults to `true`. */
+  metricsAvailable?: boolean;
+}
+
+export interface RisingNiche {
+  keyword: string;
+  downloads: number;
+  assets: number;
+  growth: number;
+  /** 0..100, higher = more crowded. */
+  competition: number;
+  metricsAvailable?: boolean;
+}
+
+export interface TopPerformer {
+  asset: SearchAsset;
+  /** Downloads attributed to the active period (manual: filtered by
+   *  uploadDate; mock: synthesized). */
+  recentDownloads: number;
+}
+
+export interface SeasonalTrend {
+  keyword: string;
+  /** Calendar month (0-11) where this keyword historically peaks. */
+  peakMonth: number;
+  /** Multiplier of peak-month downloads vs avg month. ≥ 1 means the
+   *  keyword has a real spike at peak. */
+  peakLift: number;
+  /** Where we are vs the peak in the calendar year. */
+  status: "in_season" | "approaching" | "off_season";
+  /** `false` when we couldn't derive a seasonal signal honestly (e.g. not
+   *  enough months of data). UI must label `Unavailable` and not render
+   *  the lift number. */
+  available: boolean;
 }
 
 export interface ProviderTrendingResult extends ProviderResultEnvelope {
   trending: TrendingKeyword[];
+  risingNiches: RisingNiche[];
+  topPerformers: TopPerformer[];
+  seasonal: SeasonalTrend[];
+  /** Echo of the filters the server actually applied (after defaults). */
+  appliedFilters: TrendingFilters;
 }
 
 export interface DataProvider {
@@ -266,7 +335,10 @@ export interface DataProvider {
     ctx?: ProviderContext,
     filters?: HeatmapFilters,
   ): Promise<ProviderHeatmapResult>;
-  trending(ctx?: ProviderContext): Promise<ProviderTrendingResult>;
+  trending(
+    ctx?: ProviderContext,
+    filters?: TrendingFilters,
+  ): Promise<ProviderTrendingResult>;
 }
 
 /**

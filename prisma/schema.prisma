@@ -167,7 +167,7 @@ model CachedSearch {
 model ExportHistory {
   id           String   @id @default(cuid())
   userId       String
-  type         String // "search" | "portfolio" | "saved" | "imported"
+  type         String // "search" | "portfolio" | "saved" | "imported" | "heatmap" | "trending"
   query        String // search keyword, contributor query, dataset name, etc.
   rowCount     Int
   dataQuality  String   @default("demo") // "demo" | "estimated" | "public_metadata" | "verified"

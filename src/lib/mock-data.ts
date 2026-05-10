@@ -129,17 +129,52 @@ export function generateMockSearchResults(
   return { totalResults, results };
 }
 
-export const TRENDING_KEYWORDS = [
-  { keyword: "ai generated background", growth: 187, volume: 32_400 },
-  { keyword: "minimalist office", growth: 142, volume: 18_900 },
-  { keyword: "remote work lifestyle", growth: 121, volume: 15_200 },
-  { keyword: "sustainable living", growth: 98, volume: 12_100 },
-  { keyword: "abstract gradient", growth: 86, volume: 21_700 },
-  { keyword: "diverse team meeting", growth: 73, volume: 9_800 },
-  { keyword: "futuristic technology", growth: 65, volume: 14_600 },
-  { keyword: "watercolor texture", growth: 58, volume: 11_300 },
-  { keyword: "cozy home interior", growth: 52, volume: 13_400 },
-  { keyword: "fitness motivation", growth: 47, volume: 8_700 },
+/**
+ * Demo trending keywords. Each row tags the dominant content type so the
+ * mock provider can honor the trending content-type filter without
+ * synthesising fake per-asset metrics. Anything missing a contentType
+ * defaults to "photo" in the provider.
+ */
+export const TRENDING_KEYWORDS: ReadonlyArray<{
+  keyword: string;
+  growth: number;
+  volume: number;
+  contentType: "photo" | "illustration" | "vector" | "video" | "template" | "3d";
+}> = [
+  { keyword: "ai generated background", growth: 187, volume: 32_400, contentType: "illustration" },
+  { keyword: "minimalist office", growth: 142, volume: 18_900, contentType: "photo" },
+  { keyword: "remote work lifestyle", growth: 121, volume: 15_200, contentType: "photo" },
+  { keyword: "sustainable living", growth: 98, volume: 12_100, contentType: "photo" },
+  { keyword: "abstract gradient", growth: 86, volume: 21_700, contentType: "vector" },
+  { keyword: "diverse team meeting", growth: 73, volume: 9_800, contentType: "photo" },
+  { keyword: "futuristic technology", growth: 65, volume: 14_600, contentType: "3d" },
+  { keyword: "watercolor texture", growth: 58, volume: 11_300, contentType: "illustration" },
+  { keyword: "cozy home interior", growth: 52, volume: 13_400, contentType: "photo" },
+  { keyword: "fitness motivation", growth: 47, volume: 8_700, contentType: "video" },
+  { keyword: "summer travel scene", growth: 39, volume: 22_500, contentType: "photo" },
+  { keyword: "holiday seasonal banner", growth: 33, volume: 17_200, contentType: "vector" },
+];
+
+/**
+ * Demo seasonal trends. Calendar-month index (0-11) marks the historical
+ * peak; `peakLift` is "peak month vs avg" multiplier. The mock provider
+ * uses these verbatim and labels them Demo Data.
+ */
+export const SEASONAL_TRENDS: ReadonlyArray<{
+  keyword: string;
+  peakMonth: number;
+  peakLift: number;
+}> = [
+  { keyword: "winter holiday", peakMonth: 11, peakLift: 4.8 },
+  { keyword: "valentines day", peakMonth: 1, peakLift: 5.2 },
+  { keyword: "spring fashion", peakMonth: 2, peakLift: 2.4 },
+  { keyword: "easter celebration", peakMonth: 3, peakLift: 3.1 },
+  { keyword: "summer vacation", peakMonth: 6, peakLift: 3.7 },
+  { keyword: "back to school", peakMonth: 7, peakLift: 2.9 },
+  { keyword: "halloween decor", peakMonth: 9, peakLift: 4.4 },
+  { keyword: "thanksgiving table", peakMonth: 10, peakLift: 3.5 },
+  { keyword: "new year fireworks", peakMonth: 0, peakLift: 4.0 },
+  { keyword: "back to office", peakMonth: 8, peakLift: 2.2 },
 ];
 
 export const HEATMAP_NICHES = [
