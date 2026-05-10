@@ -31,7 +31,11 @@ import { ADOBE_STOCK_BASE_URL } from "@/lib/adobe-stock-link";
 
 const escape = (value: unknown): string => {
   const s = String(value ?? "");
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  // Quote any field containing a comma, double-quote, CR, or LF. The
+  // `\r` case was missing before PR #20 — without it, a title that
+  // happened to carry a bare carriage return could split a row across
+  // lines in Excel.
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
 };
 

@@ -33,7 +33,7 @@ export function PortfolioSearchForm({
       <div className="relative flex-1">
         <Users className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
-          placeholder="Contributor name, numeric ID, or stock.adobe.com/contributor URL"
+          placeholder="Contributor name, numeric ID, stock.adobe.com/contributor URL, or /search?creator_id=… URL"
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
           className="pl-10"

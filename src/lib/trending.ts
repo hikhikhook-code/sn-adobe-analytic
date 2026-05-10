@@ -200,7 +200,10 @@ export function seasonalStatus(
 
 function escape(value: string | number | boolean): string {
   const s = String(value);
-  if (/[",\n]/.test(s)) {
+  // Quote any field containing a comma, double-quote, CR, or LF. `\r`
+  // is the PR #20 addition — without it a bare carriage return inside
+  // a keyword/title could split a row across lines in Excel.
+  if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;

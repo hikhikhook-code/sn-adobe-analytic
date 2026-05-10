@@ -214,11 +214,13 @@ export function NicheDetailDrawer({
                 <section>
                   <header className="mb-2 flex items-center justify-between">
                     <h3 className="text-sm font-semibold">Top performing assets</h3>
-                    <Button asChild size="sm" variant="ghost">
+                    <Button asChild size="sm" variant="outline">
                       <Link
                         href={`/search?q=${encodeURIComponent(niche.keyword)}`}
+                        title="Open the Search page pre-filtered to this niche's keyword"
                       >
-                        Open in search <ArrowRight className="h-3.5 w-3.5" />
+                        View search results{" "}
+                        <ArrowRight className="h-3.5 w-3.5" />
                       </Link>
                     </Button>
                   </header>
