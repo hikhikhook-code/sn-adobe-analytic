@@ -11,6 +11,7 @@ import type {
   DataProvider,
   ProviderCapabilities,
   ProviderContributorResult,
+  ProviderDashboardResult,
   ProviderSearchRequest,
   ProviderSearchResult,
   ProviderSimilarRequest,
@@ -65,6 +66,12 @@ const CAPABILITIES: ProviderCapabilities = {
   heatmap: "unsupported",
   trending: "unsupported",
   similarImage: "unsupported",
+  // Dashboard rollup needs per-user portfolio analytics (downloads,
+  // performance, content breakdown) that public-metadata pages do not
+  // expose. We return an honest "partial" envelope instead of throwing
+  // so the UI can render `Unavailable` placeholders rather than
+  // silently substituting demo data.
+  dashboard: "partial",
   // Public pages do not expose verified download numbers. UI renders
   // `Unavailable` for downloads / performance / downloadsPerMonth on every
   // result this provider returns.
@@ -400,6 +407,43 @@ export const officialAdobeProvider: DataProvider = {
 
   async trending() {
     throw new ProviderFeatureUnsupportedError(PROVIDER_ID, "trending");
+  },
+
+  async dashboard() {
+    // Public-metadata sources do not expose user-portfolio analytics.
+    // We deliberately RETURN an honestly-labeled empty response (rather
+    // than throw `ProviderFeatureUnsupportedError`) so the UI can show
+    // the `Unavailable` state when the user explicitly chose
+    // `DATA_PROVIDER=official`, instead of silently substituting demo
+    // numbers. The mock and manual providers serve users who haven't
+    // pinned `official`.
+    const cfg = readConfig();
+    return {
+      importedAssets: 0,
+      importedAssetsAvailable: false,
+      totalDownloads: 0,
+      totalDownloadsAvailable: false,
+      averagePerformanceScore: 0,
+      averagePerformanceScoreAvailable: false,
+      contentBreakdown: [],
+      contentBreakdownAvailable: false,
+      topPerformers: [],
+      topPerformersAvailable: false,
+      keywordHighlights: [],
+      keywordHighlightsAvailable: false,
+      trendingKeywords: [],
+      trendingKeywordsAvailable: false,
+      dataQuality: "public_metadata",
+      providerId: PROVIDER_ID,
+      providerName: PROVIDER_NAME,
+      capabilities: CAPABILITIES,
+      notice: cfg
+        ? "Dashboard portfolio analytics are not available from a public-metadata source. " +
+          "Verified download counts and per-user performance figures require a first-party " +
+          "signed feed or an imported CSV."
+        : "Public-metadata source not configured. Dashboard analytics are unavailable; " +
+          "set OFFICIAL_PROVIDER_BASE_URL or import a CSV to populate this page.",
+    } satisfies ProviderDashboardResult;
   },
 
   async similar(req: ProviderSimilarRequest) {

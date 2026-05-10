@@ -49,6 +49,7 @@ through a search call first:
 | Heat Map | supported | supported | unsupported → falls back | unsupported → falls back |
 | Trending keywords | supported | supported | unsupported → falls back | unsupported → falls back |
 | Similar Image Search | supported (demo ranking) | supported (metadata-similarity proxy over imports) | unsupported (honest empty + notice) | unsupported (honest empty + notice) |
+| Dashboard analytics rollup | supported (Demo Data) | supported (Verified from import) | partial (honest `Unavailable` per metric) | partial (honest `Unavailable` + notice) |
 | Verified download counts | provided as `Demo Data` | provided as `Verified from import` | not provided (`metricsAvailable: false`) | not provided |
 
 `unsupported → falls back` means `runProvider()` automatically falls back
@@ -105,8 +106,8 @@ Status legend:
 | 5.3 | Niche detail drilldown — top assets, related keywords, content-type breakdown | **Implemented** (mock + manual) / **Unsupported** (official) | Clicking a heat-map tile opens a Radix dialog drawer that calls `/api/heatmap?niche=<keyword>` to fetch a single-tile detail response. Top-8 assets sorted by downloads then performance, related keywords surfaced from co-occurrence in the same scope, content-type breakdown rendered as a percentage bar. |
 | 5.3 | Opportunity Finder — "Best Opportunities" section | **Implemented** (mock + manual) | Surfaces top niches sorted by opportunity score, filtered to competition ≤ 60 (with a graceful fallback to top-by-opportunity when strict filter yields nothing). Each row shows the data-quality badge so the user sees `Demo Data` / `Verified` consistently. |
 | 5.3 | Heat Map CSV export — niche list + niche detail | **Implemented** | Dedicated `/api/heatmap/export` endpoint produces either a single-row-per-niche "list" CSV or a multi-section "detail" CSV (overview + top assets + related keywords + content-type breakdown). Honors `metricsAvailable` and `capabilities.downloadsAvailable` so unavailable cells render `Unavailable` rather than fake `0`. Records an `ExportHistory` row with `type = "heatmap"`, the active dataset scope, and the applied filters. |
-| 5.4 | **Dashboard** — quick stats, recent searches, saved preview, search-usage progress | **Implemented** | Reads search history, favorites, exports tables. |
-| 5.4 | Trending keywords on dashboard | **Implemented** (mock + manual) | Same as `/trending`. |
+| 5.4 | **Dashboard** — quick stats, recent searches, saved preview, search-usage progress | **Implemented** (mock + manual) / **Partial** (official) | `/api/dashboard` returns three concerns: (1) account-wide activity counters from the DB (searches today, saved assets, exports made, tracked contributors, imported assets) — always truthful regardless of provider; (2) provider-derived analytics rollup via `runDashboard()` (total downloads, average performance score, content-type breakdown, top performers, keyword highlights, trending widget) with per-metric `*Available` companion flags; (3) recent search history + saved-assets preview rows tagged with the active provider's data quality. Mock synthesizes a demo portfolio from `TRENDING_KEYWORDS` and tags every figure `Demo Data`. Manual aggregates the user's imports under the active dataset scope and tags figures `Verified` (downloads gated on `metricsAvailable`). Official returns an honestly-labeled response with every `*Available: false` and a notice — the UI must render `Unavailable` rather than fake zeros. See §8. |
+| 5.4 | Trending keywords on dashboard | **Implemented** (mock + manual) / **Unavailable** (official) | Backed by `runDashboard().trendingKeywords` (top 8 by recent volume, derived locally from imports for manual; canned demo for mock). The `/dashboard` page additionally fetches `/api/search/trending` for the larger trending widget. |
 | 5.5 | **Similar Image Search** | **Implemented** (mock + manual, metadata proxy) / **Unsupported** (official) | `/search` shows a "Search by image" panel (toggle in the search bar) that accepts an image upload, an image URL, or a free-text hint. POST `/api/search/similar` runs the chosen provider and returns the same result shape as keyword search, plus a `similarityScore` (0–100) and a per-row `similarityAvailable` flag. Mock provider returns demo similar-image results ranked by token overlap (`Demo Data` envelope). Manual provider ranks the user's imported assets by metadata-similarity proxy — title-token Jaccard, keyword overlap, category/content-type match, plus a 100-point boost when the URL exactly matches `adobeStockUrl`/`thumbnailUrl`. Manual responses are tagged `Estimated`, never `Verified`, because the *ranking* is a metadata heuristic — not real visual AI. Official provider returns an empty result with a clear notice ("not available from this public-metadata source") — no scraping, no internal Adobe APIs, no proxy rotation. Result cards reuse the existing UI (favorites work; selection works) plus a Similarity tile. CSV export sends `type = "similar"` to `/api/export`, which adds a `Similarity Score` column and records an export-history row. |
 | 5.5 | Similar Image Search — Find similar from a card | **Implemented** | Every keyword-search result card now has an active "Find similar" button (replaces the previous "Coming Soon" stub). Clicking it opens the Similar Image Search panel, seeds the URL field with the asset's Adobe Stock URL (or thumbnail), and runs the metadata-similarity ranking. |
 | 5.6 | **Export CSV** | **Implemented** | `/export` route + history page. CSV columns match PRD §5.6. Each export row records the active dataset scope. Similar Image Search exports use `type = "similar"` and add a leading `Similarity Score` column; cells render `Unavailable` when `similarityAvailable: false`. |
@@ -289,3 +290,96 @@ What was deliberately **not** added in this PR:
 
 These are explicit non-goals of PR #8 per the user's brief and the PRD's
 hard constraints.
+
+---
+
+## 8. Dashboard backend — status by provider (PR #13)
+
+PR #13 turned `/api/dashboard` from a flat counter endpoint into a
+provider-aware analytics rollup. Selection mirrors the rest of the app:
+the dataset selector’s scope (all / specific / demo) flows through to the
+dashboard, and `runDashboard()` falls back to mock when the requested
+provider can’t fulfill the request (e.g. official without a configured
+feed).
+
+### Response shape
+
+```
+{
+  signedIn, hasImportedData,
+  searchesToday, savedAssets, exportsMade, trackedContributors, importedAssets,
+  datasetScope, datasetName, scopeReason,
+  recentSearches[],
+  savedAssetsPreview[]: { id, assetId, thumbnailUrl, title, contributorName,
+                         downloads, performanceScore, keywords, savedAt,
+                         dataQuality, providerName },
+  analytics: ProviderDashboardResult,   // see below
+  provider: { id, name, dataQuality, capabilities, notice }
+}
+```
+
+`analytics` (`ProviderDashboardResult`) carries:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `importedAssets` / `importedAssetsAvailable` | `number` / `boolean` | Total assets in scope. Mock: demo pool size. Manual: imported asset count. Official: `0` + `Available: false`. |
+| `totalDownloads` / `totalDownloadsAvailable` | `number` / `boolean` | Sum of in-scope downloads. Mock: demo. Manual: gated on `metricsAvailable`. Official: unavailable. |
+| `averagePerformanceScore` / `*Available` | `number` / `boolean` | 0–100 mean. Manual ignores `performanceScore === 0` rows so metadata-only imports don’t depress the figure. |
+| `contentBreakdown` / `*Available` | `{ type, count, pct }[]` / `boolean` | Per-content-type asset counts + percentage. Always available on mock + manual. |
+| `topPerformers` / `*Available` | `TopPerformer[]` / `boolean` | Up to 8 in-scope assets sorted by downloads then performance. |
+| `keywordHighlights` / `*Available` | `DashboardKeywordHighlight[]` / `boolean` | Top 8 keywords by downloads then asset count. Each row carries its own `metricsAvailable` so the UI can render `—` when downloads aren’t derivable. |
+| `trendingKeywords` / `*Available` | `TrendingKeyword[]` / `boolean` | Lightweight widget data. Manual derives from a `30d` recent vs prior bucket on `uploadDate`; mock pulls from `TRENDING_KEYWORDS`. |
+| `dataQuality` | `"demo" \| "estimated" \| "public_metadata" \| "verified"` | Envelope-level label. UI uses this for the page banner + per-card badge. |
+| `providerId` / `providerName` / `capabilities` / `notice` | envelope fields | Same shape as every other provider response. |
+
+### Per-provider matrix
+
+| Metric | mock (Demo Data) | manual (Verified) | official configured (Public Metadata) | official unset |
+| --- | --- | --- | --- | --- |
+| `searchesToday` / `savedAssets` / `exportsMade` / `trackedContributors` | from DB | from DB | from DB | from DB (or zeros for guests) |
+| `importedAssets` (counter) | 0 unless demo scope synthesizes | scoped imported asset count | scoped imported asset count | scoped imported asset count |
+| `totalDownloads` | demo | verified-from-import (gated on `metricsAvailable`) | **Unavailable** (`Available: false`) | **Unavailable** + “not configured” notice |
+| `averagePerformanceScore` | demo | verified mean over rows with non-zero score | **Unavailable** | **Unavailable** |
+| `contentBreakdown` | demo | verified counts (incl. `unknown` bucket) | **Unavailable** | **Unavailable** |
+| `topPerformers` | demo top 8 | top 8 by downloads then perf | **Unavailable** | **Unavailable** |
+| `keywordHighlights` | demo top 8 | top 8 by downloads then assets | **Unavailable** | **Unavailable** |
+| `trendingKeywords` (widget) | canned demo | derived 30d window | **Unavailable** | **Unavailable** |
+| `recentSearches` | from `SearchHistory` | from `SearchHistory` | from `SearchHistory` | empty (guest) |
+| `savedAssetsPreview` | from `Favorite` rows | from `Favorite` rows | from `Favorite` rows | empty (guest) |
+
+**Dataset-scope awareness.** The same scope that powers Search /
+Portfolio / Heat Map flows through to the dashboard. “All datasets”
+aggregates every non-archived dataset; “Selected dataset” narrows to one;
+“Demo” forces the mock provider even for users with imports. The
+`importedAssets` counter is always 0 under demo scope (the user asked
+for demo data, so we honor it). The provider-derived analytics envelope
+follows the same routing rules — see §1 “Selection order.”
+
+### What’s implemented in PR #13
+
+- `ProviderCapabilities.dashboard` flag on every provider.
+- `ProviderDashboardResult` type + `runDashboard()` helper.
+- `mockProvider.dashboard()` synthesizes a demo “portfolio” from
+  `TRENDING_KEYWORDS` (every figure tagged `Demo Data`).
+- `manualImportProvider.dashboard()` aggregates imports within the
+  active dataset scope (`Verified`; downloads gated on
+  `metricsAvailable`).
+- `officialAdobeProvider.dashboard()` returns an honestly-labeled
+  `Public Metadata` envelope with every `*Available: false` and a
+  notice — no fake numbers.
+- `/api/dashboard` returns activity counters + analytics rollup +
+  recent searches + saved-assets preview in one response.
+
+### What’s deferred to the next Dashboard UI PR
+
+- Rendering the new `analytics`, `savedAssetsPreview`, and
+  `provider` payload in the dashboard page — the existing UI continues
+  to consume the back-compat counters and recent-searches list, but the
+  new fields are unused for now.
+- A dedicated saved-assets preview card on the dashboard.
+- Per-metric data-quality badges on each stat card (currently a single
+  page-level banner is rendered).
+- Performance-analytics widgets (top performers, content breakdown
+  chart, keyword highlights) — backend ready, UI deferred.
+- Per-search provider snapshot in `recentSearches` (we don’t persist the
+  active provider on each `SearchHistory` row yet).

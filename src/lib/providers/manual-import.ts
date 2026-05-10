@@ -29,11 +29,13 @@ import {
   ProviderRequiresUserError,
 } from "./types";
 import type {
+  DashboardKeywordHighlight,
   DataProvider,
   HeatmapFilters,
   HeatmapTile,
   ProviderCapabilities,
   ProviderContributorResult,
+  ProviderDashboardResult,
   ProviderHeatmapResult,
   ProviderSearchRequest,
   ProviderSearchResult,
@@ -59,6 +61,10 @@ const CAPABILITIES: ProviderCapabilities = {
   // the query (URL/filename/hint). The envelope tags the response
   // `Estimated` so users never confuse this with true visual AI matching.
   similarImage: "supported",
+  // Dashboard analytics aggregate the user's own imported assets within
+  // the active dataset scope. Numbers are tagged `Verified` (from
+  // import) for figures the user actually supplied.
+  dashboard: "supported",
   // The user uploaded these numbers themselves — we trust them as
   // verified-from-import. The UI still shows the data-quality badge so
   // the source is always visible.
@@ -905,6 +911,183 @@ export const manualImportProvider: DataProvider = {
       providerName: PROVIDER_NAME,
       notice,
     } satisfies ProviderSimilarResult;
+  },
+
+  async dashboard(ctx) {
+    if (!ctx?.userId) throw new ProviderRequiresUserError(PROVIDER_ID);
+    const rows = await loadUserAssets(ctx.userId, ctx.datasetScope);
+    if (rows.length === 0) {
+      throw new ProviderNoDataError(PROVIDER_ID, "no datasets imported");
+    }
+    const assets = rows.map(toSearchAsset);
+
+    const importedAssets = assets.length;
+    // Total downloads across the active scope. Sum is meaningful only
+    // when at least one asset carries a verified download number; if
+    // the user uploaded nothing but metadata, every asset has
+    // `metricsAvailable: false` and we report unavailable rather than
+    // a misleading zero.
+    const withMetrics = assets.filter((a) => a.metricsAvailable !== false);
+    const totalDownloads = withMetrics.reduce((s, a) => s + a.downloads, 0);
+    const totalDownloadsAvailable = withMetrics.length > 0;
+
+    // Performance score: average across rows where we actually have a
+    // non-zero number. The CSV importer leaves performanceScore at 0
+    // when the user omitted the column AND we couldn't derive it.
+    // Including those zeros depresses the average for portfolios that
+    // are mostly metadata-only; gating on `> 0` keeps the figure honest.
+    const perfPool = assets.filter((a) => a.performanceScore > 0);
+    const averagePerformanceScore =
+      perfPool.length > 0
+        ? Math.round(
+            perfPool.reduce((s, a) => s + a.performanceScore, 0) /
+              perfPool.length,
+          )
+        : 0;
+    const averagePerformanceScoreAvailable = perfPool.length > 0;
+
+    // Content breakdown — always available because contentType is
+    // bucketed into "unknown" rather than dropped.
+    const breakdownMap = new Map<string, number>();
+    for (const a of assets) {
+      breakdownMap.set(
+        a.contentType,
+        (breakdownMap.get(a.contentType) ?? 0) + 1,
+      );
+    }
+    const contentBreakdown = Array.from(breakdownMap.entries())
+      .map(([type, count]) => ({
+        type,
+        count,
+        pct: assets.length ? Math.round((count / assets.length) * 100) : 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    // Top performers — sort by downloads (desc), then perf score.
+    // Filter out rows with no metrics; if every row is metadata-only,
+    // surface the most recently uploaded so the dashboard isn't blank.
+    const performerPool =
+      withMetrics.length > 0
+        ? withMetrics
+        : [...assets].sort(
+            (a, b) =>
+              new Date(b.uploadDate).getTime() -
+              new Date(a.uploadDate).getTime(),
+          );
+    const topPerformers: TopPerformer[] = [...performerPool]
+      .sort(
+        (a, b) =>
+          b.downloads - a.downloads ||
+          b.performanceScore - a.performanceScore,
+      )
+      .slice(0, 8)
+      .map((a) => ({ asset: a, recentDownloads: a.downloads }));
+    const topPerformersAvailable = withMetrics.length > 0;
+
+    // Keyword highlights — frequency + total downloads per keyword
+    // across the in-scope asset set. Cap to the top 8 by downloads then
+    // assets. Falls back to frequency-only ranking when downloads are
+    // unavailable (every row's `metricsAvailable: false`).
+    const kwAccum = new Map<
+      string,
+      { keyword: string; assets: number; downloads: number }
+    >();
+    for (const a of assets) {
+      for (const k of a.keywords) {
+        const key = k.toLowerCase().trim();
+        if (!key) continue;
+        const cur = kwAccum.get(key) ?? {
+          keyword: key,
+          assets: 0,
+          downloads: 0,
+        };
+        cur.assets += 1;
+        if (a.metricsAvailable !== false) cur.downloads += a.downloads;
+        kwAccum.set(key, cur);
+      }
+    }
+    const keywordHighlights: DashboardKeywordHighlight[] = Array.from(
+      kwAccum.values(),
+    )
+      .map((v) => ({ ...v, metricsAvailable: totalDownloadsAvailable }))
+      .sort((a, b) => b.downloads - a.downloads || b.assets - a.assets)
+      .slice(0, 8);
+
+    // Trending widget data: lightweight derivation — bucket each
+    // keyword's downloads into a "last 30d" vs "previous 30d" window
+    // by uploadDate, then surface the top 8 by recent volume. Same
+    // honest caveats as `trending()` — uploadDate ≠ download timing,
+    // so the figure is best-effort but tagged Verified-from-import.
+    const now = Date.now();
+    const halfMs = trendingPeriodMs("30d");
+    const recentByKeyword = new Map<
+      string,
+      { keyword: string; recent: number; prev: number }
+    >();
+    for (const a of assets) {
+      if (a.metricsAvailable === false) continue;
+      const ts = new Date(a.uploadDate).getTime();
+      const age = Number.isFinite(ts) ? now - ts : Number.POSITIVE_INFINITY;
+      const isRecent = age <= halfMs;
+      const isPrev = age <= halfMs * 2 && age > halfMs;
+      for (const kw of a.keywords) {
+        const key = kw.toLowerCase().trim();
+        if (!key) continue;
+        const cur = recentByKeyword.get(key) ?? {
+          keyword: key,
+          recent: 0,
+          prev: 0,
+        };
+        if (isRecent) cur.recent += a.downloads;
+        if (isPrev) cur.prev += a.downloads;
+        recentByKeyword.set(key, cur);
+      }
+    }
+    const trendingKeywords: TrendingKeyword[] = Array.from(
+      recentByKeyword.values(),
+    )
+      .filter((v) => v.recent > 0 || v.prev > 0)
+      .map((v) => {
+        const growth =
+          v.prev > 0
+            ? Math.round(((v.recent - v.prev) / v.prev) * 100)
+            : v.recent > 0
+              ? 100
+              : 0;
+        return {
+          keyword: v.keyword,
+          volume: v.recent + v.prev,
+          growth,
+          metricsAvailable: true,
+        };
+      })
+      .sort((a, b) => b.volume - a.volume || b.growth - a.growth)
+      .slice(0, 8);
+    const trendingKeywordsAvailable = trendingKeywords.length > 0;
+
+    return {
+      importedAssets,
+      importedAssetsAvailable: true,
+      totalDownloads,
+      totalDownloadsAvailable,
+      averagePerformanceScore,
+      averagePerformanceScoreAvailable,
+      contentBreakdown,
+      contentBreakdownAvailable: true,
+      topPerformers,
+      topPerformersAvailable,
+      keywordHighlights,
+      keywordHighlightsAvailable: keywordHighlights.length > 0,
+      trendingKeywords,
+      trendingKeywordsAvailable,
+      dataQuality: "verified",
+      providerId: PROVIDER_ID,
+      capabilities: CAPABILITIES,
+      providerName: PROVIDER_NAME,
+      notice: !totalDownloadsAvailable
+        ? "Imported assets do not include verified download counts. Re-import with a downloads column to unlock totals."
+        : undefined,
+    } satisfies ProviderDashboardResult;
   },
 };
 

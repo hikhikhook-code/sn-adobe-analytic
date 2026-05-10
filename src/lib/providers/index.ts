@@ -13,6 +13,7 @@ import type {
   HeatmapFilters,
   ProviderContext,
   ProviderContributorResult,
+  ProviderDashboardResult,
   ProviderHeatmapResult,
   ProviderResultEnvelope,
   ProviderSearchRequest,
@@ -218,8 +219,15 @@ export async function runSimilar(
   return runProvider(ctx, (p) => p.similar(req, ctx));
 }
 
+export async function runDashboard(
+  ctx?: ProviderContext,
+): Promise<ProviderDashboardResult> {
+  return runProvider(ctx, (p) => p.dashboard(ctx));
+}
+
 export { mockProvider, officialAdobeProvider, manualImportProvider };
 export type {
+  DashboardKeywordHighlight,
   DataProvider,
   DataQuality,
   HeatmapContentType,
@@ -229,6 +237,7 @@ export type {
   HeatmapTile,
   ProviderCapabilities,
   ProviderContext,
+  ProviderDashboardResult,
   ProviderFeatureSupport,
   ProviderSearchRequest,
   ProviderSearchResult,

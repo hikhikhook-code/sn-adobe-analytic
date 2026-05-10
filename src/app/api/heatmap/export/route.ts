@@ -89,6 +89,7 @@ const ResultSchema = z.object({
       heatmap: z.enum(["supported", "partial", "unsupported"]),
       trending: z.enum(["supported", "partial", "unsupported"]),
       similarImage: z.enum(["supported", "partial", "unsupported"]),
+      dashboard: z.enum(["supported", "partial", "unsupported"]),
       downloadsAvailable: z.boolean(),
     })
     .optional(),
