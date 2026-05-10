@@ -32,7 +32,13 @@ type LookupState =
   | { kind: "idle" }
   | { kind: "loading"; describe: string }
   | { kind: "ready"; data: PortfolioApiResponse }
-  | { kind: "not-found"; describe: string; provider?: string }
+  | {
+      kind: "not-found";
+      describe: string;
+      provider?: string;
+      /** Server-provided message — preferred over the generic fallback. */
+      message?: string;
+    }
   | { kind: "unsupported"; provider?: string; reason: string }
   | { kind: "error"; message: string };
 
@@ -57,11 +63,13 @@ export default function PortfolioPage() {
       if (res.status === 404) {
         const json = (await res.json().catch(() => ({}))) as {
           providerName?: string;
+          message?: string;
         };
         setState({
           kind: "not-found",
           describe,
           provider: json.providerName,
+          message: json.message,
         });
         return;
       }
@@ -183,7 +191,7 @@ export default function PortfolioPage() {
       <div className="space-y-6 p-6">
         <PageHeader
           title="Track a contributor"
-          description="Search by contributor name, numeric contributor ID, or paste a stock.adobe.com/contributor URL."
+          description="Search by contributor name, numeric contributor ID, a stock.adobe.com/contributor URL, or an Adobe Stock search URL with creator_id (e.g. /uk/search/images?creator_id=203204060)."
         />
 
         <PortfolioSearchForm
@@ -229,9 +237,11 @@ export default function PortfolioPage() {
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-900">
             <p className="font-semibold">No contributor matched.</p>
             <p className="mt-1">
-              We couldn&apos;t find {state.describe}
-              {state.provider ? ` in ${state.provider}` : ""}. Try a different
-              name or paste the contributor URL from stock.adobe.com.
+              {state.message
+                ? state.message
+                : `We couldn't find ${state.describe}${
+                    state.provider ? ` in ${state.provider}` : ""
+                  }. Try a different name or paste the contributor URL from stock.adobe.com.`}
             </p>
           </div>
         ) : null}

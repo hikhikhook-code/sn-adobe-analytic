@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
@@ -481,7 +480,8 @@ export default function HeatmapPage() {
             <CardContent className="space-y-2">
               {loading && niches.length === 0 ? (
                 <Skeleton className="h-16 w-full" />
-              ) : (
+              ) : null}
+              {!loading &&
                 niches
                   .filter((n) => n.competition >= 70)
                   .sort((a, b) => b.competition - a.competition)
@@ -500,16 +500,16 @@ export default function HeatmapPage() {
                           {n.competition}
                         </p>
                       </div>
-                      <Button asChild size="sm" variant="ghost">
-                        <Link
-                          href={`/search?q=${encodeURIComponent(n.keyword)}`}
-                        >
-                          View <ArrowRight className="h-4 w-4" />
-                        </Link>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openDrawer(n.keyword)}
+                      >
+                        Detail <ArrowRight className="h-4 w-4" />
                       </Button>
                     </div>
-                  ))
-              )}
+                  ))}
               {!loading && niches.filter((n) => n.competition >= 70).length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   No high-competition niches in the current scope.

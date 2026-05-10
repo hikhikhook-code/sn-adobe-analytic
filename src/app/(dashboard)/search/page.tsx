@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, Suspense } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Bookmark, Check } from "lucide-react";
+import { AlertTriangle, Bookmark, Check } from "lucide-react";
 import { TopBar } from "@/components/layout/topbar";
 import { SearchBar } from "@/components/search/search-bar";
 import { SearchFilters } from "@/components/search/search-filters";
@@ -54,6 +54,38 @@ interface SimilarResponseWithScope extends SimilarSearchResponse {
   capabilities?: ProviderCapabilities;
 }
 
+/**
+ * Friendly rate-limit banner state shown when /api/search returns 429.
+ * PR #20 QA fix: the previous build surfaced the raw HTTP error
+ * ("Search failed (429)") with no context. The server already returns
+ * a structured 429 body describing the plan + remaining counter; we now
+ * render it as a dedicated banner with an upgrade CTA to /pricing
+ * instead of tunneling it through the generic `error` string.
+ */
+interface RateLimitState {
+  message: string;
+  plan?: string | null;
+  limit?: number | null;
+  used?: number | null;
+}
+
+/**
+ * Params describing one concrete search request. Extracted into its own
+ * type so every trigger (mount, filter change, pagination, scope change,
+ * recent-search pick) flows through a single `runSearch(params)` call.
+ * Before PR #20 the search page had three separate `useEffect`s that each
+ * independently called runSearch on state updates, and the API route +
+ * URL push both triggered an extra run — one user search action produced
+ * two `SearchHistory` rows and incremented Searches Today by +2.
+ */
+interface SearchParams {
+  keyword: string;
+  sort: SortMode;
+  contentType: ContentType;
+  aiFilter: AiFilter;
+  page: number;
+}
+
 function SearchPageInner() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -75,6 +107,7 @@ function SearchPageInner() {
   const [data, setData] = useState<SearchResponseWithScope | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rateLimit, setRateLimit] = useState<RateLimitState | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toolbarSort, setToolbarSort] = useState<"default" | "downloads" | "performance">("default");
   const [exporting, setExporting] = useState(false);
@@ -109,79 +142,198 @@ function SearchPageInner() {
   const { items: recents, add: addRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches();
   const { isFavorited, toggle: toggleFavorite } = useFavorites();
 
+  /**
+   * PR #20 dedupe guard. Holds the signature of the most recent
+   * in-flight (or just-completed) search. We check it before issuing a
+   * fetch so React's double-rendering, URL sync, and scope-change
+   * effect cannot fire the same request twice. Each user-driven action
+   * that should force a re-run (filter change, manual resubmit,
+   * pagination) passes `force: true` to bypass the guard and still get
+   * fresh results.
+   */
+  const lastSignatureRef = useRef<string | null>(null);
+  /**
+   * AbortController for the in-flight `/api/search` fetch. When a new
+   * search is dispatched we abort the previous one so only one response
+   * ever lands — this is both a correctness fix (prevents a slower
+   * response from overwriting a newer one) and a second layer of
+   * defense against the duplicate-counter bug: an aborted request
+   * never records a server-side SearchHistory row.
+   */
+  const searchAbortRef = useRef<AbortController | null>(null);
+
   const runSearch = useCallback(
-    async (kw: string, p = 1) => {
+    async (params: SearchParams, opts?: { force?: boolean }) => {
+      const { keyword: kw, sort: so, contentType: ct, aiFilter: ai, page: pg } =
+        params;
+      if (!kw || !kw.trim()) return;
+      const signature = `${kw}\0${so}\0${ct}\0${ai}\0${pg}`;
+      if (!opts?.force && lastSignatureRef.current === signature) {
+        return;
+      }
+      lastSignatureRef.current = signature;
+      // Abort any in-flight search before starting a new one.
+      searchAbortRef.current?.abort();
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+
       setLoading(true);
       setError(null);
+      setRateLimit(null);
       try {
         const res = await fetch("/api/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keyword: kw, sort, contentType, aiFilter, page: p }),
+          body: JSON.stringify({
+            keyword: kw,
+            sort: so,
+            contentType: ct,
+            aiFilter: ai,
+            page: pg,
+          }),
+          signal: controller.signal,
         });
+        if (res.status === 429) {
+          // Plan-gated daily search cap. Server body shape:
+          //   { error, message, plan, limit, used, remaining }
+          const body = (await res.json().catch(() => ({}))) as {
+            message?: string;
+            plan?: string;
+            limit?: number;
+            used?: number;
+          };
+          setRateLimit({
+            message:
+              body.message ??
+              "Daily search limit reached. Upgrade your plan to continue searching.",
+            plan: body.plan ?? null,
+            limit: body.limit ?? null,
+            used: body.used ?? null,
+          });
+          setData(null);
+          return;
+        }
         if (!res.ok) {
           throw new Error(`Search failed (${res.status})`);
         }
         const json = (await res.json()) as SearchResponseWithScope;
+        if (controller.signal.aborted) return;
         setData(json);
-        setPage(p);
+        setPage(pg);
         setSelected(new Set());
         addRecent(kw);
       } catch (e) {
+        if ((e as Error)?.name === "AbortError") return;
         setError(e instanceof Error ? e.message : "Unknown error");
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     },
-    [sort, contentType, aiFilter, addRecent],
+    [addRecent],
   );
 
+  /**
+   * PR #20: single mount-once effect replaces the old `[initialQ]` effect
+   * that fired every time the URL changed. `handleSubmit` now drives all
+   * subsequent searches directly, so the URL effect can be a one-shot.
+   */
+  const didMountRef = useRef(false);
   useEffect(() => {
+    if (didMountRef.current) return;
+    didMountRef.current = true;
     if (initialQ) {
-      setKeyword(initialQ);
-      runSearch(initialQ, 1);
+      void runSearch(
+        {
+          keyword: initialQ,
+          sort: initialSort,
+          contentType: initialContentType,
+          aiFilter: initialAiFilter,
+          page: 1,
+        },
+        { force: true },
+      );
     }
+    // We want this to run exactly once. initialQ/initialSort/... are
+    // derived from the URL at mount and never re-read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialQ]);
+  }, []);
 
-  // Re-run the current search when the user flips the top-bar selector so
-  // the displayed results always match the active data source. We key off
-  // the serialized scope so rapid toggles coalesce.
-  const scopeKey = useMemo(() => JSON.stringify(active.scope), [active.scope]);
+  // Abort any in-flight request on unmount. Prevents the dedupe ref from
+  // pinning a never-reconciled signature across client-side navigations.
   useEffect(() => {
-    if (keyword && !active.loading) {
-      runSearch(keyword, 1);
+    return () => {
+      searchAbortRef.current?.abort();
+    };
+  }, []);
+
+  /**
+   * Dataset-selector change re-runs the current keyword so the displayed
+   * results always match the active data source. Skips the first render
+   * (mount effect handles that) and skips when there's no keyword yet.
+   *
+   * Uses a ref to tell "real scope change" apart from "first reconcile
+   * after mount" — without it the effect would fire once on mount after
+   * the active-dataset hook finishes loading and re-emit a search that
+   * was already performed, producing a duplicate SearchHistory row.
+   */
+  const scopeKey = useMemo(() => JSON.stringify(active.scope), [active.scope]);
+  const lastScopeKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (active.loading) return;
+    if (lastScopeKeyRef.current === null) {
+      lastScopeKeyRef.current = scopeKey;
+      return;
+    }
+    if (lastScopeKeyRef.current === scopeKey) return;
+    lastScopeKeyRef.current = scopeKey;
+    if (keyword) {
+      void runSearch(
+        { keyword, sort, contentType, aiFilter, page: 1 },
+        { force: true },
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey]);
+  }, [scopeKey, active.loading]);
 
   const handleSubmit = useCallback(
     (kw: string) => {
       setKeyword(kw);
       const params = new URLSearchParams(sp.toString());
       params.set("q", kw);
-      router.push(`/search?${params.toString()}`);
-      runSearch(kw, 1);
+      // router.replace (not push) so back-button doesn't collect one
+      // history entry per keystroke-then-search. Also avoids kicking
+      // off a duplicate render cycle.
+      router.replace(`/search?${params.toString()}`);
+      void runSearch(
+        { keyword: kw, sort, contentType, aiFilter, page: 1 },
+        { force: true },
+      );
     },
-    [router, runSearch, sp],
+    [router, runSearch, sort, contentType, aiFilter, sp],
   );
 
   const handleFiltersChange = useCallback(
     (next: Partial<{ sort: SortMode; contentType: ContentType; aiFilter: AiFilter }>) => {
+      const nextSort = next.sort ?? sort;
+      const nextContentType = next.contentType ?? contentType;
+      const nextAiFilter = next.aiFilter ?? aiFilter;
       if (next.sort !== undefined) setSort(next.sort);
       if (next.contentType !== undefined) setContentType(next.contentType);
       if (next.aiFilter !== undefined) setAiFilter(next.aiFilter);
+      if (!keyword) return;
+      void runSearch(
+        {
+          keyword,
+          sort: nextSort,
+          contentType: nextContentType,
+          aiFilter: nextAiFilter,
+          page: 1,
+        },
+        { force: true },
+      );
     },
-    [],
+    [sort, contentType, aiFilter, keyword, runSearch],
   );
-
-  // Re-run when filters change & we have a keyword
-  useEffect(() => {
-    if (keyword) {
-      runSearch(keyword, 1);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sort, contentType, aiFilter]);
 
   const sortedResults = useMemo(() => {
     if (!data) return [] as SearchAsset[];
@@ -581,7 +733,39 @@ function SearchPageInner() {
           </div>
         )}
 
-        {error && (
+        {/* Rate-limit banner. Replaces the old "Search failed (429)" raw
+            error path. Renders a friendly copy + upgrade CTA to /pricing
+            so a free-tier user who hits the 2/day cap has a clear next
+            step. Owners / Pro / Annual never reach this branch because
+            the server side reports `maxSearchesPerDay: "unlimited"` and
+            returns a normal 200 response. */}
+        {rateLimit && (
+          <div
+            role="alert"
+            className="flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 flex-none" />
+              <div className="min-w-0">
+                <p className="font-semibold">
+                  Daily search limit reached. Upgrade your plan to continue searching.
+                </p>
+                <p className="mt-0.5 text-[12px] text-amber-900/80">
+                  {rateLimit.plan ? `Plan: ${rateLimit.plan}` : null}
+                  {rateLimit.plan && rateLimit.limit != null ? " · " : null}
+                  {rateLimit.limit != null
+                    ? `${rateLimit.used ?? 0}/${rateLimit.limit} searches used today`
+                    : null}
+                </p>
+              </div>
+            </div>
+            <Button asChild variant="accent" size="sm" className="flex-none">
+              <Link href="/pricing">See plans &amp; upgrade</Link>
+            </Button>
+          </div>
+        )}
+
+        {error && !rateLimit && (
           <div className="rounded-md bg-rose-50 px-4 py-3 text-sm text-rose-700">
             {error}
           </div>
@@ -719,12 +903,17 @@ function SearchPageInner() {
             <Pagination
               page={page}
               hasNext={data.results.length >= data.pageSize}
-              onChange={(p) => runSearch(keyword, p)}
+              onChange={(p) =>
+                void runSearch(
+                  { keyword, sort, contentType, aiFilter, page: p },
+                  { force: true },
+                )
+              }
             />
           </>
         )}
 
-        {!loading && !data && !error && (
+        {!loading && !data && !error && !rateLimit && (
           <div className="space-y-4">
             <DataSourceBanner
               scope={active.scope}
