@@ -635,6 +635,29 @@ enum Plan {
 4. **Contributor Page:** `https://stock.adobe.com/contributor/{contributorId}`
    - Portfolio assets list, contributor info
 
+### 10.1.b Public metadata status — PR #22
+
+Status: **Implemented (foundation).** `src/lib/scraper/http.ts` +
+`src/lib/scraper/public-adobe-stock.ts` +
+`src/lib/providers/public-metadata.ts`.
+
+- Provider keys: `DATA_PROVIDER=public` (explicit) or
+  `DATA_PROVIDER=official` + `ENABLE_PUBLIC_SCRAPER=true` (alias).
+- Data quality tag: `Public Metadata`.
+- Supported fields: `id`, `title`, `thumbnailUrl`, `adobeStockUrl`,
+  `contributorName`, `contentType`, `categories`, `keywords`,
+  `isPremium`, `isAiGenerated`.
+- **Unavailable fields:** `downloads`, `performanceScore`,
+  `downloadsPerMonth`, `uploadDate` (epoch 0), `contributorId`
+  (internal Adobe id). UI renders `Unavailable` for each.
+- Cache: `CachedSearch` TTL **≈ 24h**, `CachedAsset` TTL **≈ 7d**.
+  Cache-first; stale cache served as fallback on block / transient
+  errors.
+- Safety limits: single honest UA, ≥ 1.5s process-wide gap, 10s
+  timeout, max 2 retries on 5xx / network only, `stock.adobe.com`
+  allowlist. No proxy rotation, no UA evasion, no captcha / anti-bot
+  bypass, no private APIs.
+
 ### 10.2 Scraping Rules
 - **Rate Limiting:** Max 1 request/detik ke Adobe Stock
 - **User-Agent Rotation:** Rotate user agent strings

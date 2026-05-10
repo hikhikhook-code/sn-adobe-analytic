@@ -11,26 +11,36 @@ that keeps download/performance numbers honest.
 
 ## 1. Provider architecture
 
-The app reads from one of three pluggable providers, selected by the
+The app reads from one of four pluggable providers, selected by the
 `DATA_PROVIDER` environment variable:
 
 | `DATA_PROVIDER` | Module | Data quality | Notes |
 | --- | --- | --- | --- |
 | `mock` | `src/lib/providers/mock.ts` | `Demo Data` | Default. Synthetic numbers for showcase. |
 | `manual` | `src/lib/providers/manual-import.ts` | `Verified` (from import) | Reads the user's own CSV uploads via `/import`. Auto-promoted from `mock` once a signed-in user has at least one non-archived dataset. |
-| `official` | `src/lib/providers/official-adobe.ts` | `Public Metadata` | Public-metadata / first-party HTTP boundary. Returns empty results with a notice until `OFFICIAL_PROVIDER_BASE_URL` is configured. |
+| `public` | `src/lib/providers/public-metadata.ts` | `Public Metadata` | **PR #22.** Safe public Adobe Stock metadata scraper. Cache-first (24h search / 7d asset). Never exposes download or performance numbers — those render `Unavailable`. Honest UA, no anti-bot bypass, no private APIs. See §7. |
+| `official` | `src/lib/providers/official-adobe.ts` | `Public Metadata` | Public-metadata / first-party HTTP boundary. When `ENABLE_PUBLIC_SCRAPER=true`, `official` is aliased onto the `public` provider. Otherwise returns empty results with a notice until `OFFICIAL_PROVIDER_BASE_URL` is configured. |
 
 ### Selection order
 
 1. `DATA_PROVIDER` env var picks the **requested** provider.
+   - `public` → always uses the public-metadata scraper (explicit opt-in).
+   - `official` → uses the public-metadata scraper if
+     `ENABLE_PUBLIC_SCRAPER=true`; otherwise stays on the legacy HTTP
+     boundary.
 2. If a request explicitly chose `Using demo data` (the dataset selector's
    demo scope), the mock provider is forced regardless of env.
 3. If the requested provider is `mock` and the caller passes a `userId`
    that has imported data, the manual provider is auto-promoted in.
+   **Setting `DATA_PROVIDER=public` is NOT auto-promoted** — a user who
+   asks for public metadata keeps getting public metadata even if they
+   have their own imports.
 4. Per-request fallback: when the chosen provider throws
    `ProviderRequiresUserError`, `ProviderNoDataError`,
    `ProviderFeatureUnsupportedError`, or `ProviderNotImplementedError`,
-   `runProvider()` falls back to mock so the UI never breaks.
+   `runProvider()` falls back to mock so the UI never breaks. The
+   public-metadata provider explicitly uses this for `heatmap` and
+   `trending` so those pages fall back to manual (with imports) or mock.
 5. The `official` provider deliberately does **not** throw on missing
    configuration — it returns an empty, honestly-labeled response with a
    `notice` so the UI surfaces *"not configured"* rather than silently
@@ -886,3 +896,128 @@ The Profile card now shows:
   existing rows survive the `prisma db push` without data loss.
 - No changes to payment / checkout / plan gating behavior beyond
   plumbing the new `role` field through `entitlementsFor()`.
+
+
+---
+
+## 14. Public Adobe Stock metadata scraper (PR #22)
+
+PR #22 adds `publicMetadataProvider` — a **safe, cache-first** scraper
+that reads only publicly reachable Adobe Stock pages. It moves the app
+meaningfully closer to the PRD's real-data strategy without crossing
+any of the "not allowed" lines.
+
+### Files added
+
+| File | Role |
+| --- | --- |
+| `src/lib/scraper/http.ts` | Axios-based HTTP client with honest User-Agent, process-wide rate limiter, 10s timeout, limited retry, host allowlist (`stock.adobe.com` only), captcha-body detection. |
+| `src/lib/scraper/public-adobe-stock.ts` | Cheerio-based parser. JSON-LD primary + DOM fallback. Pure `parseSearchHtml` / `parseAssetHtml` functions (unit-testable). Live `scrapeSearch` / `scrapeAsset` wrappers. |
+| `src/lib/scraper/cache.ts` | Prisma-backed cache using the pre-existing `CachedSearch` + `CachedAsset` models. 24h search TTL, 7d asset TTL, stale-fallback support. |
+| `src/lib/providers/public-metadata.ts` | `DataProvider` implementation. Cache-first, tag `public_metadata`, never surfaces download / performance numbers. |
+
+### How to enable
+
+- `DATA_PROVIDER=public` — explicit opt-in. Always uses the scraper.
+- `DATA_PROVIDER=official` + `ENABLE_PUBLIC_SCRAPER=true` — alias the
+  legacy slot onto the scraper. Without the flag, `official` stays on
+  the legacy HTTP-boundary placeholder.
+
+Tunable env vars (all optional):
+
+| Var | Default | Min / Max | Notes |
+| --- | --- | --- | --- |
+| `PUBLIC_SCRAPER_MIN_GAP_MS` | `1500` | 500 / 60000 | Minimum gap between Adobe requests, across the whole Node process. |
+| `PUBLIC_SCRAPER_TIMEOUT_MS` | `10000` | 2000 / 30000 | Per-request total timeout. |
+| `PUBLIC_SCRAPER_MAX_RETRIES` | `2` | 0 / 4 | Retries on 5xx / network errors only. 403 / 429 never retry. |
+
+### Supported fields (per asset)
+
+| Field | Source | Notes |
+| --- | --- | --- |
+| `id` | JSON-LD `identifier` → URL extraction fallback | Adobe Stock numeric id. |
+| `title` | JSON-LD `name` / `headline` → `<img alt>` fallback | |
+| `thumbnailUrl` | JSON-LD `thumbnailUrl` / `contentUrl` → `<img data-lazy>` fallback | |
+| `adobeStockUrl` | JSON-LD `mainEntityOfPage` / `@id` → anchor `href` fallback | Normalized to `/uk/` locale. |
+| `contributorName` | JSON-LD `creator.name` / `author.name` → card selector fallback | Display name only; no internal contributor id. |
+| `contentType` | JSON-LD `@type` + `genre` / `category` inspection | Values: photo, illustration, vector, video, template, 3d. |
+| `categories` | JSON-LD `genre` / `category` | |
+| `keywords` | JSON-LD `keywords` / detail-page keyword tags | |
+| `isPremium` | Card / detail badge scan | Optional. |
+| `isAiGenerated` | Card / detail badge scan | Optional. |
+
+### Unavailable fields
+
+Public Adobe Stock pages do not expose these, so the provider **never
+fabricates numbers for them**. The UI renders `Unavailable` via the
+`metricsAvailable: false` flag on every result:
+
+- `downloads`
+- `performanceScore`
+- `downloadsPerMonth`
+- `uploadDate` (epoch 0 = "not reliably known"; UI tolerates it)
+- `contributorId` (Adobe's internal id, not the display name)
+
+Feature capabilities:
+
+| Feature | Support | Rationale |
+| --- | --- | --- |
+| Search | supported | Core use case. |
+| Contributor | partial | Name + asset list only; totals / best-sellers / monthly trend are all Unavailable. |
+| Heatmap | unsupported (→ falls back) | Requires aggregated download data we do not have. |
+| Trending | unsupported (→ falls back) | Same. |
+| Similar Image Search | unsupported | No visual matching — we never fake it. |
+| Dashboard | partial | Honest empty response with `*Available: false` per metric. |
+
+### Cache policy
+
+| Cache | TTL | Behavior |
+| --- | --- | --- |
+| `CachedSearch` (search results) | **≈ 24h** | Fresh row served without hitting Adobe. Cache-first by keyword + sort + content-type + AI filter + page. |
+| `CachedAsset` (per-asset metadata) | **≈ 7d** | Individual asset records reused when a search result references them. Missing rows are tolerated — the search response hydrates what it has. |
+
+Stale cache (older than the TTL) is served **only** as a fallback when
+a live scrape fails with a `PublicScrapeBlockedError` (403 / 429 /
+captcha body) or a `PublicScrapeTransientError` (5xx / network). The
+response notice marks the row as stale and includes the `scrapedAt`
+timestamp so the user can see how old the fallback is.
+
+### Safety limits (not allowed vs. allowed)
+
+Allowed (built into PR #22):
+
+- Axios + Cheerio parsing of **public** HTML pages.
+- Single honest, identifiable User-Agent
+  (`SN-Adobe-Analytic/0.1 (+<repo-url>; public-metadata-only)`).
+- Process-wide min gap (≥ 1.5s by default) between requests.
+- 10s per-request timeout.
+- Max 2 retries on transient errors (5xx / network only).
+- Cache-first serving.
+- Graceful fallback: stale cache → honest empty response with notice.
+
+Not allowed (and deliberately absent):
+
+- Private / internal Adobe APIs.
+- Logged-in contributor dashboard scraping.
+- Proxy rotation, per-request user-agent rotation.
+- Captcha / anti-bot bypass (a captcha body **stops** the request, we
+  do not attempt to get around it).
+- Fabricated "official Adobe" download counts.
+- Secrets or API keys committed to the repo.
+- Calls to any host other than `stock.adobe.com` (refused at the HTTP
+  layer, even if a provider bug generated such a URL).
+
+### Failure semantics
+
+`publicMetadataProvider` never throws to the API route. Every failure
+collapses into:
+
+1. Serve stale cache (with a notice explaining it's stale).
+2. If there's no cache, return an empty result with an honest notice.
+   The UI's `data.notice` banner surfaces the reason verbatim.
+
+This keeps the search page usable even during an Adobe outage / block,
+and keeps download / performance cells labeled `Unavailable` in every
+case — the provider never falls back to mock to hide a failure, since
+that would replace "no verified data" with "demo data" and muddy the
+data-quality signal.

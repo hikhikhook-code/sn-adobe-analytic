@@ -76,9 +76,28 @@ niche heat maps, and export results to CSV.
     a bootstrap-only env var; once a user's email matches on login or
     register, their role is promoted to `OWNER` in the DB and survives
     even if the env var is later removed. See [*Owner / admin access*](#owner--admin-access) below.
+- **PR #22 (this PR)** — Public Adobe Stock metadata scraper + cache:
+  - `DATA_PROVIDER=public` opts into a safe, cache-first scraper of
+    publicly reachable Adobe Stock pages.
+  - `DATA_PROVIDER=official` + `ENABLE_PUBLIC_SCRAPER=true` aliases the
+    legacy slot onto the same scraper.
+  - Honest User-Agent, process-wide 1.5s min gap, 10s timeout, max 2
+    retries on 5xx / network only. `stock.adobe.com` allowlist.
+  - DB-backed cache using the pre-existing `CachedSearch` (~24h TTL)
+    and `CachedAsset` (~7d TTL) models. Stale cache served as a
+    fallback on 403 / 429 / captcha / 5xx / network failures.
+  - Supported metadata: id, title, thumbnail, Adobe Stock URL,
+    contributor name, content type, keywords, categories, premium /
+    AI flags.
+  - **Downloads / performance / downloads-per-month / upload date /
+    internal contributor id** are **never** returned — UI renders
+    `Unavailable`. No fabricated Adobe numbers.
+  - No private APIs, no proxy rotation, no UA evasion, no
+    anti-bot / captcha bypass, no logged-in dashboard scraping.
 
-- **Phase 3+** (still deferred) — official Adobe data source, similar-image
-  search, pricing checkout.
+- **Phase 3+** (still deferred) — similar-image visual search,
+  pricing checkout, first-party signed Adobe feed (would promote
+  public-metadata to `verified`).
 
 ## Tech stack
 
@@ -233,7 +252,8 @@ chosen at runtime from `DATA_PROVIDER`:
 | Value | Status | What it returns |
 | --- | --- | --- |
 | `mock` *(default)* | Implemented | Synthetic data tagged `demo`. Used everywhere by default. |
-| `official` | **Placeholder** | Throws `ProviderNotImplementedError`. Reserved for a future authoritative Adobe source (official Adobe API or a contributor's own signed export). Tagged `verified` once implemented. |
+| `public` | **Implemented (PR #22)** | Public Adobe Stock metadata scraper. Cache-first (24h search / 7d asset). Tagged `public_metadata`. Downloads / performance render **Unavailable** — they are never fabricated. See [*Public Adobe Stock metadata*](#public-adobe-stock-metadata-pr-22) below. |
+| `official` | Legacy placeholder | HTTP-boundary placeholder. When `ENABLE_PUBLIC_SCRAPER=true`, this slot is aliased onto `public`. Otherwise it returns empty results with a "not configured" notice until `OFFICIAL_PROVIDER_BASE_URL` is set. |
 | `manual` | **Implemented (Phase 3)** | Reads rows from `ImportedDataset` / `ImportedAsset` for the signed-in user. `selectProvider()` auto-promotes signed-in users with non-archived datasets to this provider — no explicit `DATA_PROVIDER=manual` needed. Tagged `verified`. |
 
 If a non-mock provider throws `ProviderNotImplementedError` at call time, the
@@ -242,9 +262,18 @@ never breaks.
 
 ### Why no live scraper?
 
-Live scraping Adobe Stock raises ToS, anti-bot, and accuracy concerns that we
-deliberately do **not** want shipped from this codebase. To make that hard to
-get wrong:
+> **Note:** The `public` provider added in PR #22 is a safe, cache-first
+> public-metadata scraper — it reads only publicly reachable Adobe Stock
+> pages, uses an honest User-Agent, rate-limits aggressively, and never
+> attempts anti-bot bypass. See [*Public Adobe Stock metadata*](#public-adobe-stock-metadata-pr-22)
+> below for the full policy. The paragraph below refers to a **different
+> class of scraper** that this repo does not and will not ship: one that
+> rotates proxies, evades UAs, scrapes logged-in contributor dashboards,
+> or fabricates Adobe download counts.
+
+Live, anti-bot-bypassing scraping raises ToS, safety, and accuracy concerns
+that we deliberately do **not** want shipped from this codebase. To make
+that hard to get wrong:
 
 - There is no scraper code, no proxy rotation, no UA evasion, and no
   private/internal Adobe API access anywhere in this repo.
@@ -264,6 +293,85 @@ get wrong:
 
 The UI will automatically render the matching badge (`Verified`,
 `Public Metadata`, etc.) on every metric.
+
+## Public Adobe Stock metadata (PR #22)
+
+`DATA_PROVIDER=public` enables a cache-first, safe public-metadata
+scraper that reads only publicly reachable Adobe Stock pages. Use it
+as an alternative to `manual` when you don't have a CSV to import
+but still want real metadata (not demo data) in the UI.
+
+**Opt in**
+
+```env
+# Either of these enables the public-metadata provider.
+DATA_PROVIDER="public"
+
+# Or keep DATA_PROVIDER="official" and flip the alias flag:
+# DATA_PROVIDER="official"
+# ENABLE_PUBLIC_SCRAPER="true"
+```
+
+**What it returns**
+
+| Field | Status |
+| --- | --- |
+| Asset id, title, thumbnail, Adobe Stock URL | Supported |
+| Contributor name, content type, keywords, categories | Supported |
+| `isPremium`, `isAiGenerated` badges | Supported when shown on the page |
+| Downloads, performance score, downloads-per-month | **Never returned** — UI shows `Unavailable` |
+| Upload date | **Unavailable** — epoch 0 placeholder |
+| Internal contributor id | **Unavailable** — public pages only expose the display name |
+
+Every response is tagged `Public Metadata` in the data-quality badge,
+and the provider carries a `notice` string that explains both the
+data-availability state (downloads unavailable) and the cache state
+(fresh, stale-on-fallback, or empty-after-failure).
+
+**Cache**
+
+| Store | TTL | When hit |
+| --- | --- | --- |
+| `CachedSearch` | ~24h | Keyword + sort + content-type + AI filter + page match. Served without hitting Adobe. |
+| `CachedAsset` | ~7d | Per-asset metadata reused across searches that reference the same id. |
+
+Stale cache (beyond the TTL) is served as a **fallback** when a live
+scrape fails with 403 / 429 / captcha / 5xx / network errors. The
+response notice marks the row as stale and includes the `scrapedAt`
+timestamp so you can tell how old the fallback is.
+
+**Safety limits**
+
+- Single honest `User-Agent` header; no rotation, no browser
+  masquerade. Includes a contact URL so Adobe can tell us to stop.
+- Process-wide minimum gap of **1.5s** between requests
+  (`PUBLIC_SCRAPER_MIN_GAP_MS`, min 500ms). This is a hard serialization
+  point — concurrent API routes share the same rate limiter.
+- **10s** per-request total timeout (`PUBLIC_SCRAPER_TIMEOUT_MS`).
+- Up to **2 retries** on 5xx / network errors only
+  (`PUBLIC_SCRAPER_MAX_RETRIES`). 403 / 429 / captcha **never retry**
+  — we back off and serve cache instead.
+- Host allowlist: `stock.adobe.com` only. Any other URL (even if a
+  provider bug generated one) is refused at the HTTP layer.
+
+**Not allowed (and deliberately absent)**
+
+- Private / internal Adobe APIs.
+- Logged-in contributor-dashboard scraping.
+- Proxy rotation, per-request UA rotation, captcha / anti-bot bypass.
+- Fabricated Adobe download counts.
+- Any secret / API key committed to the repo.
+
+**Feature coverage**
+
+| Feature | Public provider |
+| --- | --- |
+| Keyword search | Supported |
+| Contributor lookup | Partial — name + assets, totals / best-sellers unavailable |
+| Heat Map | **Unsupported** — falls back to manual (if imports) or mock |
+| Trending | **Unsupported** — falls back to manual (if imports) or mock |
+| Similar Image Search | **Unsupported** — honest empty response |
+| Dashboard analytics | Partial — metrics render `Unavailable` per-field |
 
 ## Manual data import
 

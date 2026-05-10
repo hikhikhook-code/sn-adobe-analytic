@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { mockProvider } from "./mock";
 import { officialAdobeProvider } from "./official-adobe";
 import { manualImportProvider } from "./manual-import";
+import { publicMetadataProvider } from "./public-metadata";
 import {
   ProviderFeatureUnsupportedError,
   ProviderNoDataError,
@@ -24,11 +25,27 @@ import type {
   TrendingFilters,
 } from "./types";
 
+/**
+ * Registry of available DataProviders, keyed by the `DATA_PROVIDER`
+ * env value. The `official` slot is resolved lazily in
+ * `selectProvider()` — when `ENABLE_PUBLIC_SCRAPER=true` it routes
+ * to the public-metadata scraper/cache provider; otherwise it stays
+ * on the legacy HTTP-boundary placeholder (`officialAdobeProvider`)
+ * which returns an honest "not configured" response.
+ */
 const PROVIDERS: Record<string, DataProvider> = {
   mock: mockProvider,
   official: officialAdobeProvider,
   manual: manualImportProvider,
+  public: publicMetadataProvider,
 };
+
+function isPublicScraperEnabled(): boolean {
+  // Read at call time (not module init) so tests / next-dev hot reload
+  // pick up env changes without needing a full restart.
+  const v = (process.env.ENABLE_PUBLIC_SCRAPER ?? "").toLowerCase().trim();
+  return v === "true" || v === "1" || v === "yes" || v === "on";
+}
 
 let warnedAboutLiveScraper = false;
 const warnedAboutMissingProvider: Record<string, boolean> = {};
@@ -37,8 +54,12 @@ const warnedAboutMissingProvider: Record<string, boolean> = {};
  * Resolve the current data provider from env + (optionally) user.
  *
  * Selection order:
- * 1. `DATA_PROVIDER` env var (`mock` | `official` | `manual`); unknown value
- *    → mock with a warning.
+ * 1. `DATA_PROVIDER` env var (`mock` | `official` | `manual` | `public`);
+ *    unknown value → mock with a warning.
+ *    - `public` always routes to `publicMetadataProvider` (explicit opt-in).
+ *    - `official` routes to `publicMetadataProvider` when
+ *      `ENABLE_PUBLIC_SCRAPER=true`; otherwise stays on the legacy
+ *      HTTP-boundary placeholder (`officialAdobeProvider`).
  * 2. **Auto-promote to manual** when:
  *    - the env var is `mock` (or unset), AND
  *    - the caller passed a `userId`, AND
@@ -87,6 +108,17 @@ export async function selectProvider(
     return mockProvider;
   }
 
+  // `official` is the historical alias — when the public-metadata
+  // scraper is explicitly enabled (ENABLE_PUBLIC_SCRAPER=true) we
+  // route those callers to the real public-metadata provider instead
+  // of the HTTP-boundary placeholder. Explicit `DATA_PROVIDER=public`
+  // always uses the scraper regardless of the flag — that value is
+  // itself the opt-in.
+  const resolved =
+    picked.id === "official" && isPublicScraperEnabled()
+      ? publicMetadataProvider
+      : picked;
+
   // Explicit demo scope bypasses auto-promotion. A signed-in user who has
   // imported data but deliberately chose "Using demo data" must actually
   // see demo data.
@@ -99,7 +131,7 @@ export async function selectProvider(
   // and jump straight to the manual provider. The caller has already done
   // the ownership and existence checks.
   if (
-    picked.id === "mock" &&
+    resolved.id === "mock" &&
     ctx?.userId &&
     (ctx.datasetScope?.kind === "specific" ||
       ctx.datasetScope?.kind === "all")
@@ -111,7 +143,7 @@ export async function selectProvider(
   // DATA_PROVIDER=mock. The user can still force `DATA_PROVIDER=mock` via
   // env if they want demo data, but the default should let imported data
   // win once it exists.
-  if (picked.id === "mock" && ctx?.userId) {
+  if (resolved.id === "mock" && ctx?.userId) {
     try {
       const datasetCount = await prisma.importedDataset.count({
         where: { userId: ctx.userId, archived: false },
@@ -122,7 +154,7 @@ export async function selectProvider(
     }
   }
 
-  return picked;
+  return resolved;
 }
 
 /**
@@ -225,7 +257,12 @@ export async function runDashboard(
   return runProvider(ctx, (p) => p.dashboard(ctx));
 }
 
-export { mockProvider, officialAdobeProvider, manualImportProvider };
+export {
+  mockProvider,
+  officialAdobeProvider,
+  manualImportProvider,
+  publicMetadataProvider,
+};
 export type {
   DashboardKeywordHighlight,
   DataProvider,

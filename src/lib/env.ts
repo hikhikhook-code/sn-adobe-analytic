@@ -158,7 +158,7 @@ export function assertNextAuthSecret(): string {
 // ---------------------------------------------------------------------------
 // DATA_PROVIDER
 // ---------------------------------------------------------------------------
-const KNOWN_PROVIDERS = ["mock", "official", "manual"] as const;
+const KNOWN_PROVIDERS = ["mock", "official", "manual", "public"] as const;
 export type DataProviderName = (typeof KNOWN_PROVIDERS)[number];
 
 function readDataProvider(): DataProviderName {
@@ -171,6 +171,18 @@ function readDataProvider(): DataProviderName {
       `Valid values: ${KNOWN_PROVIDERS.join(", ")}.`,
   );
   return "mock";
+}
+
+// ---------------------------------------------------------------------------
+// ENABLE_PUBLIC_SCRAPER
+// ---------------------------------------------------------------------------
+// Boolean flag that (a) aliases `DATA_PROVIDER=official` onto the public-
+// metadata scraper and (b) documents the intent to read public Adobe
+// Stock pages. Explicit `DATA_PROVIDER=public` ignores this flag and
+// always uses the scraper.
+function readEnablePublicScraper(): boolean {
+  const raw = (process.env.ENABLE_PUBLIC_SCRAPER ?? "").toLowerCase().trim();
+  return raw === "true" || raw === "1" || raw === "yes" || raw === "on";
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +238,7 @@ export const env = {
   isBuildPhase: IS_BUILD_PHASE,
   databaseUrl: readDatabaseUrl(),
   dataProvider: readDataProvider(),
+  enablePublicScraper: readEnablePublicScraper(),
   maxImportFileSizeMb: maxImportMb,
   maxImportFileSizeBytes: maxImportMb * 1024 * 1024,
   useLiveScraper: readUseLiveScraper(),
