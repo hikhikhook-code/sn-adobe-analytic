@@ -3,9 +3,9 @@ import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { assetsToCsv } from "@/lib/csv";
+import { assetsToCsv, similarAssetsToCsv } from "@/lib/csv";
 import { parseDatasetScope } from "@/lib/dataset-scope";
-import type { SearchAsset } from "@/types/search";
+import type { SearchAsset, SimilarAsset } from "@/types/search";
 
 const AssetSchema = z.object({
   id: z.string(),
@@ -23,6 +23,10 @@ const AssetSchema = z.object({
   keywords: z.array(z.string()),
   thumbnailUrl: z.string(),
   adobeStockUrl: z.string(),
+  // Optional similarity fields — only set when type === "similar".
+  similarityScore: z.number().optional(),
+  similarityAvailable: z.boolean().optional(),
+  metricsAvailable: z.boolean().optional(),
 });
 
 const ScopeSchema = z
@@ -33,7 +37,9 @@ const ScopeSchema = z
   .optional();
 
 const ExportSchema = z.object({
-  type: z.enum(["search", "portfolio", "saved", "imported"]).default("search"),
+  type: z
+    .enum(["search", "portfolio", "saved", "imported", "similar"])
+    .default("search"),
   query: z.string().default(""),
   results: z.array(AssetSchema).min(1).max(2000),
   dataQuality: z
@@ -79,7 +85,13 @@ export async function POST(req: Request) {
     datasetScope: rawScope,
     params,
   } = parsed.data;
-  const csv = assetsToCsv(results as SearchAsset[]);
+  // Similar Image Search exports get an extra Similarity Score column
+  // and honor `similarityAvailable: false` so unavailable cells render
+  // "Unavailable" instead of fake zeros.
+  const csv =
+    type === "similar"
+      ? similarAssetsToCsv(results as SimilarAsset[])
+      : assetsToCsv(results as SearchAsset[]);
 
   const session = await getServerSession(authOptions);
   const userId = session?.user?.id;

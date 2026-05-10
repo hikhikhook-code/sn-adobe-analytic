@@ -1,4 +1,4 @@
-import type { SearchAsset } from "@/types/search";
+import type { SearchAsset, SimilarAsset } from "@/types/search";
 import type {
   HeatmapFilters,
   HeatmapTile,
@@ -41,6 +41,48 @@ export function assetsToCsv(assets: SearchAsset[]): string {
         a.downloads,
         a.performanceScore,
         a.downloadsPerMonth,
+        a.contentType,
+        a.categories.join("; "),
+        a.uploadDate.slice(0, 10),
+        a.contributorName,
+        a.keywords.join("; "),
+        a.adobeStockUrl,
+        a.isPremium,
+        a.isAiGenerated,
+      ]
+        .map(escape)
+        .join(","),
+    );
+  }
+  return rows.join("\n");
+}
+
+/**
+ * CSV variant for the Similar Image Search export. Adds a leading
+ * `Similarity Score` column, and honors `similarityAvailable === false`
+ * + `metricsAvailable === false` so unavailable cells render
+ * "Unavailable" instead of fake zeros (matching the UI).
+ */
+export function similarAssetsToCsv(assets: SimilarAsset[]): string {
+  const headers = [
+    "Similarity Score",
+    ...CSV_HEADERS,
+  ];
+  const rows = [headers.join(",")];
+  for (const a of assets) {
+    const score =
+      a.similarityAvailable === false
+        ? "Unavailable"
+        : a.similarityScore;
+    const metricsOff = a.metricsAvailable === false;
+    rows.push(
+      [
+        score,
+        a.id,
+        a.title,
+        metricsOff ? "Unavailable" : a.downloads,
+        metricsOff ? "Unavailable" : a.performanceScore,
+        metricsOff ? "Unavailable" : a.downloadsPerMonth,
         a.contentType,
         a.categories.join("; "),
         a.uploadDate.slice(0, 10),

@@ -35,6 +35,7 @@ interface ExportRow {
 
 const TYPE_LABELS: Record<string, string> = {
   search: "Search results",
+  similar: "Similar image search",
   portfolio: "Portfolio",
   saved: "Saved assets",
   imported: "Imported dataset",

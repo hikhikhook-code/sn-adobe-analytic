@@ -22,6 +22,21 @@ interface ResultCardProps {
   dataQuality?: DataQuality;
   /** Quality tier of the performance score, which is always estimated. */
   scoreQuality?: DataQuality;
+  /**
+   * Optional 0–100 metadata-similarity score. When provided, the card
+   * renders a third metric tile labeled "Similarity" with a source-aware
+   * data-quality badge. Pair with `similarityAvailable: false` (or pass
+   * `similarityScore = -1`) to render "Unavailable".
+   */
+  similarityScore?: number;
+  similarityAvailable?: boolean;
+  /**
+   * When set, swaps the disabled "Find similar — Coming Soon" hint for
+   * an active button that calls back into the parent (used by the
+   * /search Similar Image Search panel to seed the URL field from a
+   * card the user is already looking at).
+   */
+  onFindSimilar?: (asset: SearchAsset) => void;
 }
 
 export function ResultCard({
@@ -32,6 +47,9 @@ export function ResultCard({
   onToggleSelected,
   dataQuality = "demo",
   scoreQuality,
+  similarityScore,
+  similarityAvailable,
+  onFindSimilar,
 }: ResultCardProps) {
   const scoreLevel: DataQuality =
     scoreQuality ?? (dataQuality === "verified" ? "estimated" : dataQuality);
@@ -140,6 +158,45 @@ export function ResultCard({
           </div>
         </div>
 
+        {typeof similarityScore === "number" ? (
+          <div className="rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 p-3 text-white">
+            <div className="flex items-center justify-between gap-1">
+              <p className="text-[10px] uppercase tracking-wide opacity-80">
+                Similarity
+              </p>
+              <DataQualityBadge
+                level={
+                  dataQuality === "verified" ? "estimated" : dataQuality
+                }
+                size="xs"
+                showLabel={false}
+                className="!border-white/40 !bg-white/15 !text-white"
+              />
+            </div>
+            {similarityAvailable === false ? (
+              <>
+                <p className="mt-0.5 text-lg font-bold leading-tight">—</p>
+                <p
+                  className="text-[10px] opacity-80"
+                  title="No metadata overlap could be computed against this asset."
+                >
+                  Unavailable
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="mt-0.5 text-lg font-bold leading-tight">
+                  {similarityScore}
+                  <span className="text-xs font-normal opacity-80">/100</span>
+                </p>
+                <p className="text-[10px] opacity-80">
+                  Metadata-similarity proxy
+                </p>
+              </>
+            )}
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-2 gap-2">
           <div className="rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 p-3 text-white">
             <div className="flex items-center justify-between gap-1">
@@ -229,15 +286,27 @@ export function ResultCard({
           >
             {asset.contributorName}
           </a>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 text-muted-foreground/70"
-            disabled
-            title="Similar Image Search is not supported by the current data provider yet (Coming Soon)."
-          >
-            <ImageIcon className="h-3.5 w-3.5" />
-            Find similar — Coming Soon
-          </button>
+          {onFindSimilar ? (
+            <button
+              type="button"
+              onClick={() => onFindSimilar(asset)}
+              className="inline-flex items-center gap-1 text-accent-blue hover:underline"
+              title="Use this asset's image URL to find metadata-similar results."
+            >
+              <ImageIcon className="h-3.5 w-3.5" />
+              Find similar
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-muted-foreground/70"
+              disabled
+              title="Similar Image Search is available from the Search by image panel above."
+            >
+              <ImageIcon className="h-3.5 w-3.5" />
+              Find similar
+            </button>
+          )}
         </div>
 
         <div className="mt-auto rounded-lg bg-muted/40 p-3">
