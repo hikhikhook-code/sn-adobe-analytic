@@ -83,10 +83,11 @@ export function ResultCard({
     dataQuality,
     providerId,
   });
-  const contributorLink = resolveContributorLink(asset, {
-    dataQuality,
-    providerId,
-  });
+  // resolveContributorLink intentionally doesn't take a context bag:
+  // per src/lib/adobe-stock-link.ts we ALWAYS route contributor links
+  // through a UK keyword search, so the dataQuality / providerId bag
+  // that resolveAssetLink uses has nothing to decide on here.
+  const contributorLink = resolveContributorLink(asset);
 
   const keywordsShown = showAllKeywords ? asset.keywords : asset.keywords.slice(0, 6);
 

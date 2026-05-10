@@ -315,13 +315,14 @@ export function resolveAssetLink(
  */
 export function resolveContributorLink(
   asset: Pick<SearchAsset, "contributorId" | "contributorName">,
-  _ctx: AssetLinkContext = {},
 ): ResolvedAdobeLink {
-  // `_ctx` accepted for API parity with resolveAssetLink and so callers
-  // don't have to special-case this one. It's intentionally unused:
-  // see the module-level policy — we never produce a direct
-  // contributor-page URL regardless of how the caller classifies the
-  // row. The `contributorId` in `asset` is ignored for the same reason.
+  // No `ctx` parameter — see the module-level policy: we never produce
+  // a direct contributor-page URL regardless of how the caller
+  // classifies the row, so data-quality / provider-id have nothing to
+  // gate. The `contributorId` field on `asset` is ignored for the
+  // same reason (it's kept in the Pick<> signature only so callers
+  // can pass the same asset object they pass to resolveAssetLink
+  // without extra field plucking).
   const name = (asset.contributorName ?? "").trim();
   if (name) {
     return {
