@@ -290,7 +290,11 @@ function SearchPageInner() {
     if (didMountRef.current) return;
     didMountRef.current = true;
     if (!initialQ) return;
-    const sig = `${initialQ}\0${initialSort}\0${initialContentType}\0${initialAiFilter}\01`;
+    // `\x00` separator between fields + literal `1` for the initial page.
+    // NOTE: written as `\0` + `1` would parse as the octal escape `\01`
+    // which TypeScript's strict mode rejects — keep the explicit `\x00`
+    // form so the scanner never mistakes it for an octal literal.
+    const sig = `${initialQ}\x00${initialSort}\x00${initialContentType}\x00${initialAiFilter}\x001`;
     const now = Date.now();
     if (
       LAST_INITIAL_URL_SEARCH &&
