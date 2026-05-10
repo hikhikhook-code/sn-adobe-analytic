@@ -4,6 +4,10 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { runSearch } from "@/lib/providers";
+import {
+  ProviderNoDataError,
+  ProviderRequiresUserError,
+} from "@/lib/providers/types";
 import { parseDatasetScope, resolveDatasetScope } from "@/lib/dataset-scope";
 import {
   checkAndResetDailySearchBudget,
@@ -107,10 +111,45 @@ export async function POST(req: Request) {
     userId,
     parseDatasetScope(data.datasetScope),
   );
-  const result = await runSearch(data, {
-    userId,
-    datasetScope: scopeInfo.scope,
-  });
+
+  let result;
+  try {
+    result = await runSearch(data, {
+      userId,
+      datasetScope: scopeInfo.scope,
+    });
+  } catch (err) {
+    // PR #23: when a signed-in user has no data and hasn't opted into
+    // demo mode, runProvider now throws instead of silently substituting
+    // mock data. Return an honest empty response the UI can render as
+    // a "no data configured" state.
+    if (
+      err instanceof ProviderNoDataError ||
+      err instanceof ProviderRequiresUserError
+    ) {
+      return NextResponse.json({
+        totalResults: 0,
+        competitionLevel: "low",
+        aiSaturation: 0,
+        contentBreakdown: [],
+        results: [],
+        page: data.page ?? 1,
+        pageSize: 0,
+        dataQuality: "demo",
+        providerName: "No data source",
+        providerId: "none",
+        datasetScope: scopeInfo.scope,
+        datasetName: scopeInfo.datasetName ?? null,
+        scopeReason: scopeInfo.reason,
+        hasAnyDatasets: scopeInfo.hasAnyDatasets,
+        capabilities: null,
+        notice:
+          "No data source is configured. Import a CSV, configure the public metadata provider, or switch to demo mode.",
+        noDataConfigured: true,
+      });
+    }
+    throw err;
+  }
 
   // Dedup the side effects (history row + counter tick) but always
   // return fresh results. Gated on a signed-in user — anonymous callers

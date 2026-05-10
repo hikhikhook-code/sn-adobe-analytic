@@ -283,16 +283,16 @@ export function resolveAssetLink(
       kind: "search",
       label: "Search on Adobe Stock",
       reason:
-        "This is demo / mock data with no real Adobe Stock URL, so the link opens a UK keyword search on Adobe Stock instead.",
+        "No verified Adobe Stock URL available for this asset. The link opens a keyword search on Adobe Stock instead.",
     };
   }
 
   return {
     href: null,
     kind: "none",
-    label: "Demo asset — no real Adobe URL",
+    label: "No Adobe Stock link available",
     reason:
-      "This is demo / mock data and we don't have a real Adobe Stock URL or a searchable title for it.",
+      "No real Adobe Stock URL or searchable title is available for this asset.",
   };
 }
 
@@ -338,6 +338,6 @@ export function resolveContributorLink(
     href: null,
     kind: "none",
     label: "Unknown contributor",
-    reason: "No contributor info available for this demo asset.",
+    reason: "No contributor info available for this asset.",
   };
 }

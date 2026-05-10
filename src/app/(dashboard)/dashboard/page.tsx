@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataQualityBanner } from "@/components/ui/data-quality";
 import { DataSourceBanner } from "@/components/layout/data-source-banner";
+import { NoDataState } from "@/components/ui/no-data-state";
 import { PerformanceAnalytics } from "@/components/dashboard/performance-analytics";
 import { SavedAssetsPreview } from "@/components/dashboard/saved-assets-preview";
 import { RecentSearchesWidget } from "@/components/dashboard/recent-searches-widget";
@@ -208,14 +209,18 @@ export default function DashboardPage() {
           />
         </div>
 
-        <PerformanceAnalytics
-          analytics={analytics}
-          fallbackNotice={
-            provider.id === "official" && !analytics.notice
-              ? "Dashboard analytics are limited on public-metadata sources. Import a CSV for verified figures."
-              : undefined
-          }
-        />
+        {(analytics as { noDataConfigured?: boolean }).noDataConfigured ? (
+          <NoDataState page="dashboard" showDemoOption={stats.signedIn} />
+        ) : (
+          <PerformanceAnalytics
+            analytics={analytics}
+            fallbackNotice={
+              provider.id === "official" && !analytics.notice
+                ? "Dashboard analytics are limited on public-metadata sources. Import a CSV for verified figures."
+                : undefined
+            }
+          />
+        )}
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="space-y-4 lg:col-span-2">
