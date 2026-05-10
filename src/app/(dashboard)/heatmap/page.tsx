@@ -405,7 +405,7 @@ export default function HeatmapPage() {
                   <div className="text-xs opacity-90">
                     <p className="text-base font-bold">{downloadsLabel}</p>
                     <p>
-                      {formatNumber(n.assets)} assets \u00b7 comp {n.competition}
+                      {formatNumber(n.assets)} assets · comp {n.competition}
                     </p>
                     <p className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-white/20 px-2 py-0.5 text-[10px] font-semibold">
                       <Sparkles className="h-3 w-3" />
