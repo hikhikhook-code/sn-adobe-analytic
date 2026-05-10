@@ -158,12 +158,10 @@ model Favorite {
   @@index([userId, collectionId])
 }
 
-/**
- * User-defined folder for organizing saved assets and saved searches.
- * Users can create as many as they want. Deleting a collection moves its
- * contained items back to "Uncategorized" (SetNull) rather than cascading
- * — we never want a misclick to wipe the user's saved library.
- */
+/// User-defined folder for organizing saved assets and saved searches.
+/// Users can create as many as they want. Deleting a collection moves its
+/// contained items back to "Uncategorized" (SetNull) rather than cascading
+/// — we never want a misclick to wipe the user's saved library.
 model Collection {
   id          String   @id @default(cuid())
   userId      String
@@ -183,16 +181,14 @@ model Collection {
   @@index([userId])
 }
 
-/**
- * User-saved search query + filter set. Separate from SearchHistory —
- * history is transient, SavedSearch is pinned by the user. Carries the
- * resolved provider + data-quality at save time so the UI can label the
- * row honestly even if the user later switches providers.
- *
- * Dataset scope is snapshotted as a string tag (same shape as
- * ExportHistory) so a later archive/rename of the underlying dataset
- * doesn't break the saved row.
- */
+/// User-saved search query + filter set. Separate from SearchHistory —
+/// history is transient, SavedSearch is pinned by the user. Carries the
+/// resolved provider + data-quality at save time so the UI can label the
+/// row honestly even if the user later switches providers.
+///
+/// Dataset scope is snapshotted as a string tag (same shape as
+/// ExportHistory) so a later archive/rename of the underlying dataset
+/// doesn't break the saved row.
 model SavedSearch {
   id           String   @id @default(cuid())
   userId       String
