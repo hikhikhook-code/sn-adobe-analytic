@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { assertNextAuthSecret } from "@/lib/env";
+import { bootstrapOwnerIfEligible } from "@/lib/owner-bootstrap";
 
 /**
  * Whether Google OAuth is wired for this deployment.
@@ -98,6 +99,20 @@ export const authOptions: NextAuthOptions = {
         });
       } catch {
         // Swallow — device logging must not break sign-in.
+      }
+
+      // PR #18: eager owner-access bootstrap. If this user's email is
+      // on OWNER_EMAILS, promote their DB role to OWNER and stamp
+      // `ownerAccessGrantedAt` / `ownerAccessSource = "env_bootstrap"`.
+      // The helper is idempotent and swallows its own DB errors; a
+      // lazy version of the same call also runs on every gated
+      // request via `getSessionEntitlements`, so if this fails the
+      // user still gets promoted on their next request.
+      try {
+        const email = (user as { email?: string | null }).email ?? null;
+        await bootstrapOwnerIfEligible(userId, email);
+      } catch {
+        // Never block sign-in on bootstrap failure.
       }
     },
   },
