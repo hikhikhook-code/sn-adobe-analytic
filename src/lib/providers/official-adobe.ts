@@ -1,4 +1,5 @@
 import { calculateCompetitionLevel } from "@/lib/scoring";
+import { normalizeAdobeStockUrl } from "@/lib/adobe-stock-link";
 import { RESULTS_PER_PAGE } from "@/lib/constants";
 import type {
   AiFilter,
@@ -200,7 +201,11 @@ function toSearchAsset(raw: PublicAsset): SearchAsset {
     isPremium: Boolean(raw.isPremium),
     isAiGenerated: Boolean(raw.isAiGenerated),
     keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
-    adobeStockUrl: raw.adobeStockUrl ?? "",
+    // PR #19: normalize `/id/` -> `/uk/` on any provider URL that
+    // carries the misleading Indonesian locale prefix. See
+    // src/lib/adobe-stock-link.ts for the rationale.
+    adobeStockUrl:
+      normalizeAdobeStockUrl(raw.adobeStockUrl) ?? raw.adobeStockUrl ?? "",
     metricsAvailable: false,
   };
 }

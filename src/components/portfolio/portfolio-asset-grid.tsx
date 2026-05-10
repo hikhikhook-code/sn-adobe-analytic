@@ -133,6 +133,7 @@ export function PortfolioAssetGrid({
                 key={asset.id}
                 asset={asset}
                 dataQuality={data.dataQuality}
+                providerId={data.providerId}
                 selected={selected.has(asset.id)}
                 onToggleSelected={onToggleSelect}
               />

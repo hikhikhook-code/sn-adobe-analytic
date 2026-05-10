@@ -26,6 +26,7 @@ import {
   DataQualityBanner,
 } from "@/components/ui/data-quality";
 import { DataSourceBanner } from "@/components/layout/data-source-banner";
+import { resolveAssetLink } from "@/lib/adobe-stock-link";
 import {
   TrendingFilters,
   type TrendingFilterState,
@@ -465,16 +466,41 @@ export default function TrendingPage() {
                           </p>
                         </div>
                       </div>
-                      <Button size="sm" variant="ghost" asChild>
-                        <a
-                          href={a.adobeStockUrl || "#"}
-                          target="_blank"
-                          rel="noreferrer"
-                          aria-label={`Open ${a.title} on Adobe Stock`}
-                        >
-                          <ArrowRight className="h-4 w-4" />
-                        </a>
-                      </Button>
+                      {(() => {
+                        // Route through the safe link helper so demo
+                        // rows don't link to a fake stock.adobe.com/<id>
+                        // detail page. See src/lib/adobe-stock-link.ts.
+                        const link = resolveAssetLink(a, {
+                          dataQuality,
+                          providerId: data?.providerId,
+                        });
+                        if (!link.href) {
+                          return (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled
+                              title={link.reason}
+                              aria-label={link.label}
+                            >
+                              <ArrowRight className="h-4 w-4" />
+                            </Button>
+                          );
+                        }
+                        return (
+                          <Button size="sm" variant="ghost" asChild>
+                            <a
+                              href={link.href}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              title={link.reason}
+                              aria-label={`${link.label}: ${a.title}`}
+                            >
+                              <ArrowRight className="h-4 w-4" />
+                            </a>
+                          </Button>
+                        );
+                      })()}
                     </div>
                   );
                 })}
