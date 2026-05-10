@@ -2,8 +2,14 @@ import { calculateCompetitionLevel } from "@/lib/scoring";
 import { normalizeAdobeStockUrl } from "@/lib/adobe-stock-link";
 import { RESULTS_PER_PAGE } from "@/lib/constants";
 import {
+  ASSET_TTL_MS,
+  CONTRIBUTOR_TTL_MS,
   SEARCH_TTL_MS,
+  readAssetCache,
+  readContributorCache,
   readSearchCache,
+  writeAssetCache,
+  writeContributorCache,
   writeSearchCache,
 } from "@/lib/scraper/cache";
 import {
@@ -12,6 +18,14 @@ import {
   type ScrapeResult,
   type ScrapedAsset,
 } from "@/lib/scraper/public-adobe-stock";
+import {
+  fetchAssetDetail,
+  type ScrapedAssetDetail,
+} from "@/lib/scraper/asset-detail";
+import {
+  fetchContributorPage,
+  type ScrapedContributor,
+} from "@/lib/scraper/contributor-page";
 import type {
   AiFilter,
   ContentType,
@@ -481,6 +495,8 @@ export const officialAdobeProvider: DataProvider = {
     //    is unset AND the scraper is enabled.
     const scraped = await searchViaPublicScraper(req);
     if (scraped && scraped.scrape.status === "ok") {
+      // PR #24: enrich results with any cached asset-detail metadata
+      scraped.envelope.results = await enrichSearchResultsFromCache(scraped.envelope.results);
       await writeSearchCache(cacheKey, scraped.envelope, SEARCH_TTL_MS);
       return scraped.envelope;
     }
@@ -500,70 +516,89 @@ export const officialAdobeProvider: DataProvider = {
 
   async contributor(query: string) {
     const cfg = readConfig();
-    if (!cfg) {
+    const scraperOn = isPublicScraperEnabled();
+
+    // 0. Nothing configured: return a clean, honest empty state.
+    if (!cfg && !scraperOn) {
       return emptyContributorResult(
         query,
         "Public-metadata source not configured. Set OFFICIAL_PROVIDER_BASE_URL " +
-          "to point this provider at your authorized public-metadata endpoint.",
+          "or PUBLIC_SCRAPER_ENABLED=true to enable contributor lookups.",
       );
     }
-    const url = new URL(`${cfg.baseUrl}/contributor`);
-    url.searchParams.set("query", query);
-    const payload = await fetchJson<PublicContributorPayload>(
-      url.toString(),
-      cfg,
+
+    // 1. Cache-first read for contributor data (PR #24).
+    const source = cfg ? "official_api" : "public_scrape";
+    const contributorCacheKey = {
+      source: source as "public_scrape" | "official_api",
+      contributorId: query.trim().toLowerCase(),
+    };
+    const cachedContributor = await readContributorCache<ProviderContributorResult>(contributorCacheKey);
+    if (cachedContributor?.fresh) {
+      return {
+        ...cachedContributor.payload,
+        providerId: PROVIDER_ID,
+        providerName: PROVIDER_NAME,
+        capabilities: CAPABILITIES,
+        dataQuality: "public_metadata",
+        notice: cachedContributor.payload.notice
+          ? `${cachedContributor.payload.notice} (cached ${formatAge(cachedContributor.fetchedAt)})`
+          : `Served from cache (${formatAge(cachedContributor.fetchedAt)} old).`,
+      };
+    }
+
+    // 2. HTTP boundary path (preferred when configured).
+    if (cfg) {
+      try {
+        const url = new URL(`${cfg.baseUrl}/contributor`);
+        url.searchParams.set("query", query);
+        const payload = await fetchJson<PublicContributorPayload>(
+          url.toString(),
+          cfg,
+        );
+        const result = buildContributorEnvelope(payload, query);
+        await writeContributorCache(contributorCacheKey, result, CONTRIBUTOR_TTL_MS);
+        return result;
+      } catch (err) {
+        console.warn(
+          "[officialAdobeProvider] HTTP boundary contributor failed:",
+          (err as Error).message,
+        );
+        if (cachedContributor) {
+          return staleContributorCacheEnvelope(cachedContributor.payload, cachedContributor.fetchedAt);
+        }
+        throw err;
+      }
+    }
+
+    // 3. Public scraper path (PR #24). Fetches the contributor's public
+    //    profile page when the HTTP boundary is not configured.
+    if (scraperOn) {
+      const scraped = await fetchContributorPage(query);
+      if (scraped.status === "ok" && scraped.contributor) {
+        const result = scrapedContributorToResult(scraped.contributor, query);
+        await writeContributorCache(contributorCacheKey, result, CONTRIBUTOR_TTL_MS);
+        return result;
+      }
+
+      // Scraper failed — try stale cache as fallback
+      if (cachedContributor) {
+        return staleContributorCacheEnvelope(cachedContributor.payload, cachedContributor.fetchedAt);
+      }
+
+      // No cache, scraper couldn't parse — return honest empty state
+      return emptyContributorResult(
+        query,
+        scraped.reason ??
+          "Could not fetch contributor metadata from the public Adobe Stock page. " +
+          "No data is available for this contributor.",
+      );
+    }
+
+    return emptyContributorResult(
+      query,
+      "Public-metadata source not configured for contributor lookups.",
     );
-    const assets = (payload.assets ?? []).map(toSearchAsset);
-    const totalDownloads = assets.reduce((s, a) => s + a.downloads, 0);
-    const best =
-      assets.length > 0
-        ? [...assets].sort((a, b) => b.downloads - a.downloads)[0]
-        : { id: "", title: "(no assets)", downloads: 0 };
-    const breakdownMap = new Map<string, number>();
-    for (const a of assets) {
-      breakdownMap.set(a.contentType, (breakdownMap.get(a.contentType) ?? 0) + 1);
-    }
-    const contentBreakdown = Array.from(breakdownMap.entries())
-      .map(([type, count]) => ({
-        type,
-        count,
-        pct: assets.length
-          ? Math.round((count / assets.length) * 100)
-          : 0,
-      }))
-      .sort((a, b) => b.count - a.count);
-    const kwFreq = new Map<string, number>();
-    for (const a of assets) {
-      for (const k of a.keywords) kwFreq.set(k, (kwFreq.get(k) ?? 0) + 1);
-    }
-    const topKeywords = Array.from(kwFreq.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 12)
-      .map(([keyword, count]) => ({ keyword, count }));
-    return {
-      name: payload.name ?? query,
-      joinDate: payload.joinDate ?? new Date(0).toISOString(),
-      totalAssets: payload.totalAssets ?? assets.length,
-      totalDownloads,
-      avgDownloads: assets.length
-        ? Math.round(totalDownloads / assets.length)
-        : 0,
-      bestAsset: { id: best.id, title: best.title, downloads: best.downloads },
-      contentBreakdown,
-      topKeywords,
-      // Monthly trend cannot be reliably reconstructed from public
-      // metadata (uploadDate ≠ download timing). Return an empty
-      // array and let the UI render the partial-support state.
-      monthlyTrend: [],
-      assets,
-      dataQuality: "public_metadata",
-      providerName: PROVIDER_NAME,
-      providerId: PROVIDER_ID,
-      capabilities: CAPABILITIES,
-      notice:
-        "Contributor analytics from a public-metadata source are partial: " +
-        "download history and verified totals are not available.",
-    } satisfies ProviderContributorResult;
   },
 
   async heatmap() {
@@ -623,6 +658,198 @@ export const officialAdobeProvider: DataProvider = {
 // ---------------------------------------------------------------------------
 // Local helpers (filter + sort + cache envelope helpers).
 // ---------------------------------------------------------------------------
+
+/**
+ * Build a contributor result envelope from an HTTP boundary payload.
+ */
+function buildContributorEnvelope(
+  payload: PublicContributorPayload,
+  query: string,
+): ProviderContributorResult {
+  const assets = (payload.assets ?? []).map(toSearchAsset);
+  const totalDownloads = assets.reduce((s, a) => s + a.downloads, 0);
+  const best =
+    assets.length > 0
+      ? [...assets].sort((a, b) => b.downloads - a.downloads)[0]
+      : { id: "", title: "(no assets)", downloads: 0 };
+  const breakdownMap = new Map<string, number>();
+  for (const a of assets) {
+    breakdownMap.set(a.contentType, (breakdownMap.get(a.contentType) ?? 0) + 1);
+  }
+  const contentBreakdown = Array.from(breakdownMap.entries())
+    .map(([type, count]) => ({
+      type,
+      count,
+      pct: assets.length ? Math.round((count / assets.length) * 100) : 0,
+    }))
+    .sort((a, b) => b.count - a.count);
+  const kwFreq = new Map<string, number>();
+  for (const a of assets) {
+    for (const k of a.keywords) kwFreq.set(k, (kwFreq.get(k) ?? 0) + 1);
+  }
+  const topKeywords = Array.from(kwFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([keyword, count]) => ({ keyword, count }));
+  return {
+    name: payload.name ?? query,
+    joinDate: payload.joinDate ?? new Date(0).toISOString(),
+    totalAssets: payload.totalAssets ?? assets.length,
+    totalDownloads,
+    avgDownloads: assets.length ? Math.round(totalDownloads / assets.length) : 0,
+    bestAsset: { id: best.id, title: best.title, downloads: best.downloads },
+    contentBreakdown,
+    topKeywords,
+    monthlyTrend: [],
+    assets,
+    dataQuality: "public_metadata",
+    providerName: PROVIDER_NAME,
+    providerId: PROVIDER_ID,
+    capabilities: CAPABILITIES,
+    notice:
+      "Contributor analytics from a public-metadata source are partial: " +
+      "download history and verified totals are not available.",
+  };
+}
+
+/**
+ * Convert a scraped contributor page (PR #24) into a ProviderContributorResult.
+ */
+function scrapedContributorToResult(
+  scraped: ScrapedContributor,
+  query: string,
+): ProviderContributorResult {
+  const assets = scraped.assets.map(scrapedToSearchAsset);
+  const breakdownMap = new Map<string, number>();
+  for (const a of assets) {
+    breakdownMap.set(a.contentType, (breakdownMap.get(a.contentType) ?? 0) + 1);
+  }
+  const contentBreakdown = Array.from(breakdownMap.entries())
+    .map(([type, count]) => ({
+      type,
+      count,
+      pct: assets.length ? Math.round((count / assets.length) * 100) : 0,
+    }))
+    .sort((a, b) => b.count - a.count);
+  const kwFreq = new Map<string, number>();
+  for (const a of assets) {
+    for (const k of a.keywords) kwFreq.set(k, (kwFreq.get(k) ?? 0) + 1);
+  }
+  const topKeywords = Array.from(kwFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([keyword, count]) => ({ keyword, count }));
+  return {
+    name: scraped.name ?? query,
+    joinDate: scraped.joinDate ?? new Date(0).toISOString(),
+    totalAssets: scraped.totalAssets ?? assets.length,
+    // Downloads are NOT available from public pages — always 0 with
+    // metricsAvailable: false downstream.
+    totalDownloads: 0,
+    avgDownloads: 0,
+    bestAsset: { id: "", title: "(no download data)", downloads: 0 },
+    contentBreakdown,
+    topKeywords,
+    monthlyTrend: [],
+    assets,
+    dataQuality: "public_metadata",
+    providerName: PROVIDER_NAME,
+    providerId: PROVIDER_ID,
+    capabilities: CAPABILITIES,
+    notice:
+      "Contributor metadata scraped from public Adobe Stock pages. " +
+      "Download counts, performance scores, and monthly trends are not " +
+      "available from public pages and are labeled Unavailable.",
+  };
+}
+
+function staleContributorCacheEnvelope(
+  payload: ProviderContributorResult,
+  fetchedAt: Date,
+): ProviderContributorResult {
+  return {
+    ...payload,
+    providerId: PROVIDER_ID,
+    providerName: PROVIDER_NAME,
+    capabilities: CAPABILITIES,
+    dataQuality: "public_metadata",
+    notice:
+      "Live contributor fetch failed; showing cached results from " +
+      `${formatAge(fetchedAt)} ago.`,
+  };
+}
+
+/**
+ * Enrich search results with cached asset detail metadata (PR #24).
+ *
+ * For each search result that has an asset ID, check the asset-detail
+ * cache. If a fresh entry exists, merge richer metadata (keywords,
+ * upload date, categories, contributor ID) into the SearchAsset. This
+ * enrichment happens WITHOUT extra network requests — we only read
+ * what's already cached from prior asset-detail page fetches.
+ *
+ * This is a best-effort enrichment: missing cache entries are skipped,
+ * and the original search result fields are preserved as fallback.
+ */
+export async function enrichSearchResultsFromCache(
+  results: SearchAsset[],
+): Promise<SearchAsset[]> {
+  const enriched: SearchAsset[] = [];
+  for (const asset of results) {
+    if (!asset.id || asset.id.length < 6) {
+      enriched.push(asset);
+      continue;
+    }
+    const cached = await readAssetCache<ScrapedAssetDetail>({
+      source: "public_scrape",
+      assetId: asset.id,
+    });
+    if (cached?.fresh && cached.payload) {
+      const detail = cached.payload;
+      enriched.push({
+        ...asset,
+        // Enrich with richer detail-page data where available
+        title: detail.title || asset.title,
+        keywords: detail.keywords?.length ? detail.keywords : asset.keywords,
+        uploadDate: detail.uploadDate || asset.uploadDate,
+        categories: detail.categories?.length ? detail.categories : asset.categories,
+        contentType: detail.contentType || asset.contentType,
+        contributorName: detail.contributorName || asset.contributorName,
+        contributorId: detail.contributorId || asset.contributorId,
+        isPremium: detail.isPremium ?? asset.isPremium,
+        isAiGenerated: detail.isAiGenerated ?? asset.isAiGenerated,
+        thumbnailUrl: detail.thumbnailUrl || asset.thumbnailUrl,
+        // metricsAvailable stays false — detail pages don't expose downloads
+        metricsAvailable: false,
+      });
+    } else {
+      enriched.push(asset);
+    }
+  }
+  return enriched;
+}
+
+/**
+ * Fetch and cache a single asset's detail metadata (PR #24).
+ * Used by the provider when it wants to populate the CachedAsset table
+ * for subsequent enrichment. Never throws.
+ */
+export async function fetchAndCacheAssetDetail(
+  assetIdOrUrl: string,
+): Promise<ScrapedAssetDetail | null> {
+  if (!isPublicScraperEnabled()) return null;
+  const result = await fetchAssetDetail(assetIdOrUrl);
+  if (result.status === "ok" && result.detail) {
+    const assetId = result.detail.assetId ?? assetIdOrUrl;
+    await writeAssetCache(
+      { source: "public_scrape", assetId },
+      result.detail,
+      ASSET_TTL_MS,
+    );
+    return result.detail;
+  }
+  return null;
+}
 
 function applyClientFilters(
   results: SearchAsset[],

@@ -1116,3 +1116,163 @@ The hard constraint is preserved: if a data source cannot provide verified
 download counts, performance scores, or sales figures, those fields render
 as `Unavailable` (or `—`) in the UI. They are NEVER filled with fake zeros
 or synthetic numbers unless the user is explicitly in demo mode.
+
+
+---
+
+## 16. Public Metadata Expansion: Asset Detail + Contributor Pages (PR #24)
+
+PR #24 expands the public-metadata provider's reach beyond search-grid
+tiles. It adds parsers for individual asset detail pages and public
+contributor profile pages, caches both at ~7 day TTL, and wires the
+richer metadata back into the Search and Portfolio surfaces.
+
+### New scraper modules
+
+| Module | Target URL pattern | Purpose |
+| --- | --- | --- |
+| `src/lib/scraper/asset-detail.ts` | `stock.adobe.com/uk/images/<slug>/<id>` | Parse a single asset's public detail page for richer metadata than the search grid provides |
+| `src/lib/scraper/contributor-page.ts` | `stock.adobe.com/uk/contributor/<id>` | Parse a public contributor profile page for portfolio metadata |
+
+Both modules follow the same safety contract as the existing
+`public-adobe-stock.ts` search scraper:
+
+- Rate-limited (1 req/s per process)
+- 10-second request timeout
+- One retry on transient network errors only
+- Static user-agent identifying the app
+- Never follows redirects across hosts
+- Never sends cookies / credentials
+- Never retries on 4xx/5xx (respects rate limits / bot challenges)
+- Off by default — requires `PUBLIC_SCRAPER_ENABLED=true`
+- Production requires `PUBLIC_SCRAPER_ALLOW_PROD=true` additionally
+
+### Asset detail — supported fields
+
+| Field | Source on detail page | Notes |
+| --- | --- | --- |
+| `assetId` | URL path numeric suffix | Stable across page revisions |
+| `title` | `<h1>`, `og:title`, or `<title>` tag | Full title (not truncated like search grid) |
+| `thumbnailUrl` | `og:image` or main preview `<img>` | Higher resolution than search-grid thumbnail |
+| `keywords` | Keyword links (`/search?k=`), `meta[keywords]`, JSON-LD | Usually richer than the search grid |
+| `contributorName` | Contributor anchor text | |
+| `contributorId` | `/contributor/<id>` path from anchor href | |
+| `contributorUrl` | Full contributor page URL | Normalized to `/uk/` locale |
+| `contentType` | `og:type`, page text heuristic | photo / illustration / vector / video / template / 3d |
+| `categories` | Breadcrumb navigation links | |
+| `isPremium` | Literal "Premium" text in page | Cautious — only flagged when present |
+| `isAiGenerated` | "AI generated" / "Generative AI" text | Cautious — only flagged when present |
+| `uploadDate` | JSON-LD `datePublished` / `uploadDate` | |
+| `dimensions` | Visible "WxH" text pattern | |
+
+### Asset detail — fields that are NEVER available
+
+- `downloads`
+- `performanceScore`
+- `downloadsPerMonth`
+- Sales / revenue
+- Monthly download trends
+
+These are never fabricated. The UI renders `Unavailable`.
+
+### Contributor page — supported fields
+
+| Field | Source on contributor page | Notes |
+| --- | --- | --- |
+| `contributorId` | URL path `/contributor/<id>` | |
+| `name` | `<h1>`, `og:title`, or `.contributor-name` | |
+| `contributorUrl` | The page URL itself | Normalized to `/uk/` |
+| `assets` (portfolio) | Visible asset tiles/cards on the profile | Limited to what the first page shows |
+| `totalAssets` | "N assets/images/files" text on page | Best-effort display number |
+| `joinDate` | "Member since" / "Joined" text, or JSON-LD | |
+| `avatarUrl` | Profile image if visible | |
+
+### Contributor page — fields that are NEVER available
+
+- Total downloads / total sales
+- Per-asset download counts
+- Earnings / revenue
+- Private analytics dashboard data
+- Performance scores
+
+These are never fabricated. Portfolio Tracker surfaces them as
+`Unavailable` with a clear notice.
+
+### Cache architecture (updated)
+
+| Table | Keyed by | TTL | New in PR #24? |
+| --- | --- | --- | --- |
+| `CachedSearch` | `(source, keyword, sort, contentType, aiFilter, page)` | ~24h | No (PR #22) |
+| `CachedAsset` | `(source, assetId)` | ~7d | Schema existed in PR #22; now populated by asset-detail scraper |
+| `CachedContributor` | `(source, contributorId)` | ~7d | **Yes** |
+
+All cache tables follow the same freshness policy:
+- Fresh (`expiresAt > now()`) → return immediately, skip live fetch
+- Stale (`expiresAt <= now()`) → attempt live fetch; if it fails, serve stale payload with a notice
+- Missing → live fetch required; if that fails too → clean unavailable state
+
+### Provider integration changes
+
+**Search enrichment:** After a live scrape succeeds, the provider
+calls `enrichSearchResultsFromCache()` which merges any cached
+asset-detail metadata (keywords, upload date, categories, contributor
+info) into the search results. This enrichment is cache-only — no
+extra network requests are made during the search call itself.
+
+**Contributor lookup:** The `contributor()` method now supports three
+paths (same priority order as search):
+1. Cache-first read from `CachedContributor`
+2. HTTP boundary (`OFFICIAL_PROVIDER_BASE_URL/contributor?query=`)
+3. Public scraper (`fetchContributorPage`) when HTTP boundary is unset
+
+All three paths produce the same `ProviderContributorResult` envelope
+with `dataQuality: "public_metadata"` and `metricsAvailable: false`
+on every asset.
+
+**Asset detail on-demand:** `fetchAndCacheAssetDetail(assetIdOrUrl)`
+is exported for use by future routes that need to populate the asset
+cache (e.g. a drilldown endpoint or background enrichment job). It
+fetches the detail page, parses it, and writes to `CachedAsset`.
+
+### Data quality labels (unchanged)
+
+| Source | Label | UI treatment |
+| --- | --- | --- |
+| Public detail page metadata | `Public Metadata` | Badge on every figure |
+| App-calculated opportunity/perf score | `Estimated` | Badge |
+| Downloads / sales / performance | `Unavailable` | Renders `—` or "Unavailable" |
+| User imported CSV | `Verified` | Badge (unchanged) |
+| Mock / demo | `Demo Data` | Badge (unchanged) |
+
+### Error handling
+
+- If detail page fetch fails → use stale cache if available
+- If no stale cache → return clean unavailable state with descriptive notice
+- If contributor page fetch fails → same cache-then-unavailable flow
+- Parser exceptions are caught internally — never surface as raw errors in UI
+- Rate-limit / bot-challenge responses (4xx/5xx) are NOT retried
+
+### Hard constraints preserved (same as PR #22)
+
+- **No private / internal Adobe APIs.** Only publicly visible pages.
+- **No logged-in contributor dashboard scraping.** Only unauthenticated endpoints.
+- **No proxy rotation.** No knob, no code path.
+- **No user-agent evasion.** Static identifier naming the app.
+- **No captcha / anti-bot bypass.** 403/429/5xx → immediate fallback to cache or unavailable.
+- **No fabricated download counts.** Never zero-filled, never synthesized.
+- **No secrets committed.** All config is env-only.
+
+### Known limitations
+
+- Asset detail enrichment is opportunistic — only assets with a prior
+  cached detail page get enriched. There is no background job that
+  pre-fetches detail pages for every search result.
+- Contributor page scraping returns only the first page of portfolio
+  assets visible on the profile. Adobe may paginate or lazy-load
+  additional assets; we don't attempt to fetch subsequent pages.
+- The contributor page parser relies on HTML structure that Adobe may
+  change without notice. If parsing starts returning empty results,
+  the cache-then-unavailable fallback keeps the UI functional.
+- Monthly trends and download history remain `Unavailable` on the
+  public-metadata provider — there is no source for these on public
+  pages.

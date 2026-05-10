@@ -1,30 +1,32 @@
 /**
  * Public metadata cache — cache-first read path backing the
- * public-metadata provider (PR #22).
+ * public-metadata provider (PR #22, expanded in PR #24).
  *
- * Two tables (see `prisma/schema.prisma`):
+ * Three tables (see `prisma/schema.prisma`):
  *
  *   CachedSearch — one row per (source × keyword × sort × contentType
  *     × aiFilter × page). `payloadJson` is the exact
  *     `ProviderSearchResult` the UI consumes; reads are one SELECT +
  *     one JSON.parse, no joins.
- *   CachedAsset  — reserved for asset-detail drilldowns. Same shape:
- *     one row keyed by (source × assetId), carrying the `SearchAsset`
- *     payload verbatim.
+ *   CachedAsset  — one row keyed by (source × assetId), carrying the
+ *     asset detail payload verbatim (PR #24 now populates this from
+ *     asset detail page scraping).
+ *   CachedContributor — one row keyed by (source × contributorId),
+ *     carrying the contributor metadata payload (PR #24).
  *
- * TTL policy (per PR #22 brief):
- *   - search results: ~24h
- *   - asset details:  ~7d
+ * TTL policy:
+ *   - search results:      ~24h
+ *   - asset details:       ~7d
+ *   - contributor metadata: ~7d
  *
  * Freshness policy:
- *   - `readSearchCache` / `readAssetCache` return a row as `fresh`
- *     when `expiresAt > now()`. The provider uses the fresh payload
- *     directly and skips the live fetch entirely.
+ *   - `readSearchCache` / `readAssetCache` / `readContributorCache`
+ *     return a row as `fresh` when `expiresAt > now()`. The provider
+ *     uses the fresh payload directly and skips the live fetch.
  *   - When `expiresAt <= now()` we still return the row, but flag it
  *     `stale`. The provider attempts a live fetch first; if that
  *     fails or is blocked, it falls back to the stale payload so the
- *     UI doesn't go dark. A brief notice in the response envelope
- *     tells the user the data is from cache.
+ *     UI doesn't go dark.
  *   - When no row exists we return `null` and the provider must fetch
  *     live (or surface an unavailable state).
  *
@@ -39,6 +41,9 @@ export const SEARCH_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** TTL for asset-detail payloads. PR #22 brief: "around 7d". */
 export const ASSET_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** TTL for contributor metadata payloads. PR #24: "around 7d". */
+export const CONTRIBUTOR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Source tag distinguishing rows produced by different upstreams. New
@@ -218,6 +223,76 @@ export async function writeAssetCache<T>(
     });
   } catch (err) {
     console.warn("[cache] writeAssetCache failed:", (err as Error).message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Contributor cache (PR #24)
+// ---------------------------------------------------------------------------
+
+export interface ContributorCacheKey {
+  source: CacheSource;
+  contributorId: string;
+}
+
+export async function readContributorCache<T>(
+  key: ContributorCacheKey,
+): Promise<CachedEntry<T> | null> {
+  try {
+    const row = await prisma.cachedContributor.findUnique({
+      where: {
+        source_contributorId: {
+          source: key.source,
+          contributorId: key.contributorId,
+        },
+      },
+    });
+    if (!row) return null;
+    const payload = safeParse<T>(row.payloadJson);
+    if (!payload) return null;
+    return {
+      payload,
+      fetchedAt: row.fetchedAt,
+      expiresAt: row.expiresAt,
+      fresh: row.expiresAt.getTime() > Date.now(),
+      source: row.source as CacheSource,
+    };
+  } catch (err) {
+    console.warn("[cache] readContributorCache failed:", (err as Error).message);
+    return null;
+  }
+}
+
+export async function writeContributorCache<T>(
+  key: ContributorCacheKey,
+  payload: T,
+  ttlMs: number = CONTRIBUTOR_TTL_MS,
+): Promise<void> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ttlMs);
+  try {
+    await prisma.cachedContributor.upsert({
+      where: {
+        source_contributorId: {
+          source: key.source,
+          contributorId: key.contributorId,
+        },
+      },
+      create: {
+        source: key.source,
+        contributorId: key.contributorId,
+        payloadJson: JSON.stringify(payload),
+        fetchedAt: now,
+        expiresAt,
+      },
+      update: {
+        payloadJson: JSON.stringify(payload),
+        fetchedAt: now,
+        expiresAt,
+      },
+    });
+  } catch (err) {
+    console.warn("[cache] writeContributorCache failed:", (err as Error).message);
   }
 }
 

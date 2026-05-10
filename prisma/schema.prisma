@@ -349,6 +349,25 @@ model CachedAsset {
   @@index([expiresAt])
 }
 
+/// Cache layer for a contributor's public metadata (PR #24).
+///
+/// Stores the parsed public contributor page payload so repeat
+/// portfolio lookups don't re-fetch Adobe Stock. Keyed by
+/// (source × contributorId). TTL ~7d (contributor pages change
+/// infrequently). Same freshness policy as CachedAsset: stale rows
+/// are returned as fallback when live fetch fails.
+model CachedContributor {
+  id              String   @id @default(cuid())
+  source          String   @default("public_scrape")
+  contributorId   String
+  payloadJson     String
+  fetchedAt       DateTime @default(now())
+  expiresAt       DateTime
+
+  @@unique([source, contributorId])
+  @@index([expiresAt])
+}
+
 model ExportHistory {
   id           String   @id @default(cuid())
   userId       String
