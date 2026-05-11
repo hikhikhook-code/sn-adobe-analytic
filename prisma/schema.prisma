@@ -461,6 +461,16 @@ model ImportedAsset {
   uploadDate          DateTime?
   contributorName     String?
   contributorId       String?
+  // Optional contributor page URL (PR #29). Plumbed through from the
+  // user's CSV `contributorUrl` / `contributorprofileurl` column when
+  // present. Read at render time by `resolveContributorLink` (see
+  // `src/lib/adobe-stock-link.ts`) and used in preference to
+  // synthesizing `/uk/contributor/<id>` — the user may have pasted a
+  // real profile URL that doesn't match our synthesized shape (e.g.
+  // a locale other than `/uk/`, or a legacy `/artist/<id>` path). A
+  // non-`stock.adobe.com` URL in this column is ignored at render
+  // time; we never trust this field to point at a third-party origin.
+  contributorUrl      String?
   isPremium           Boolean  @default(false)
   isAiGenerated       Boolean  @default(false)
   keywordsJson        String   @default("[]") // JSON-encoded String[]

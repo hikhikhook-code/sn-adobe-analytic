@@ -85,6 +85,13 @@ interface ImportedAssetRow {
   uploadDate: Date | null;
   contributorName: string | null;
   contributorId: string | null;
+  /**
+   * Optional contributor page URL from the user's CSV (PR #29). When
+   * present, the link resolver prefers this over synthesizing
+   * `/uk/contributor/<id>` — the user may have copy-pasted a profile
+   * URL that doesn't match our synthesize-from-id shape.
+   */
+  contributorUrl: string | null;
   isPremium: boolean;
   isAiGenerated: boolean;
   keywordsJson: string;
@@ -138,6 +145,12 @@ function toSearchAsset(row: ImportedAssetRow): SearchAsset {
     uploadDate: uploadDate.toISOString(),
     contributorName: row.contributorName || "(unknown contributor)",
     contributorId: row.contributorId || "",
+    // PR #29: hydrate optional contributorUrl. Normalize `/id/` → `/uk/`
+    // via the link helper before handing it to the UI so user-pasted
+    // `/id/contributor/<id>` URLs in the CSV render on the UK locale.
+    // Reject non-`stock.adobe.com` origins (helper returns null) so a
+    // user can't inject a third-party link through a CSV.
+    contributorUrl: normalizeAdobeStockUrl(row.contributorUrl) ?? undefined,
     isPremium: row.isPremium,
     isAiGenerated: row.isAiGenerated,
     keywords: parseJsonArray(row.keywordsJson),

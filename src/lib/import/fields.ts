@@ -15,6 +15,7 @@ export const IMPORT_FIELDS = [
   "uploadDate",
   "contributorName",
   "contributorId",
+  "contributorUrl",
   "keywords",
   "adobeStockUrl",
   "thumbnailUrl",
