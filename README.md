@@ -242,6 +242,11 @@ the pooled + direct connection URLs, running the first `prisma db push`,
 setting Vercel env vars, and the post-deploy QA checklist — see
 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
+If you just want the short operator view (required vs optional vs
+future env vars, Google OAuth redirect URI, 2-minute post-deploy
+sanity check, troubleshooting index), start with
+**[docs/PRODUCTION-CHECKLIST.md](docs/PRODUCTION-CHECKLIST.md)**.
+
 The 30-second version:
 
 1. Create a Supabase project, copy both connection strings:
@@ -273,6 +278,30 @@ The 30-second version:
   env value.
 
 See `docs/DEPLOYMENT.md §10` for what each error message means and how to fix it.
+
+### Deployment config sanity check
+
+For operators who want to confirm the deployment picked up the env
+they set, this PR adds two non-invasive reporting surfaces. Neither
+ever echoes a secret **value** — only booleans, short states, and the
+non-sensitive categorical values like the selected provider name:
+
+- **Startup log line.** The root layout module calls
+  `logConfigStatus()` once per worker ([`src/lib/config-status.ts`](src/lib/config-status.ts)).
+  Vercel → Deployments → the current deploy → Runtime logs will show a
+  single `[config-status]` JSON line with `requiredOk`, `dataProvider`,
+  `googleOAuth`, `payment`, and a few other booleans. A second
+  `[config-status] warn` line is emitted only when something looks
+  misconfigured (e.g. `stripe_missing_webhook_secret`,
+  `public_provider_selected_but_unconfigured`).
+- **`GET /api/admin/config-status`** — owner-only. Same payload but
+  structured and fetchable from the deployed app, so you can spot-check
+  a deploy hours later without hunting through log retention. Returns
+  `401` for guests and `403` for signed-in non-owner users.
+
+Both surfaces are intentionally passive — they *report* state, they do
+not change behavior. Strict runtime enforcement still lives in
+`src/lib/env.ts` and fails the boot when required env is missing.
 
 ## Manual QA checklist
 

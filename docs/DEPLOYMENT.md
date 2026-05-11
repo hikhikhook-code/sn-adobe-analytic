@@ -3,11 +3,55 @@
 This is the step-by-step guide for deploying SN Adobe Analytic to Vercel with
 a Supabase Postgres database.
 
+> **Looking for the short version?** See
+> [`PRODUCTION-CHECKLIST.md`](PRODUCTION-CHECKLIST.md) for the 1-page
+> operator checklist (required vs optional env vars, Google OAuth
+> redirect URI, post-deploy QA, troubleshooting index).
+
 > As of **PR #27** the Prisma schema targets PostgreSQL exclusively — SQLite
 > is no longer supported. Local development also runs against Postgres
 > (Docker, Homebrew, Postgres.app, or a free Supabase project). See the
 > [README Local development](../README.md#local-development) section for
 > the one-time local setup.
+
+---
+
+## TL;DR — Required vs optional env vars
+
+For the full reference table see [§6](#6-environment-variables-reference).
+
+**Required at production runtime** — app refuses to boot without these:
+
+- `DATABASE_URL` — Supabase pooled connection (port `6543`, with
+  `?pgbouncer=true&connection_limit=1`)
+- `DIRECT_URL` — Supabase direct connection (port `5432`, for Prisma DDL)
+- `NEXTAUTH_URL` — public origin, e.g. `https://<app>.vercel.app`
+- `NEXTAUTH_SECRET` — `openssl rand -base64 32`, at least 16 chars, not
+  a placeholder
+
+**Optional** — app runs fine without them; the feature degrades to a
+clearly-labeled "not configured" state:
+
+- `DATA_PROVIDER`, `OFFICIAL_PROVIDER_BASE_URL`,
+  `OFFICIAL_PROVIDER_API_KEY`
+- `PUBLIC_SCRAPER_ENABLED`, `PUBLIC_SCRAPER_ALLOW_PROD`
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+  `NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED` — see [§6.1](#61-google-oauth-redirect-uri)
+- `OWNER_EMAILS`, `MAX_IMPORT_FILE_SIZE_MB`
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+  `SUPABASE_SERVICE_ROLE_KEY` (only if you use the Supabase JS client
+  directly — Prisma does not need them)
+
+**Optional / future** — payment integration. Implemented in the repo
+but **not yet end-to-end verified against a live Stripe account from
+the current deployment** (see [§6.2](#62-payment-env-vars-optional--deferred)):
+
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+  `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`
+- `STRIPE_*_PRICE_ID_USD`, `STRIPE_*_PRICE_ID_IDR`
+- `NEXT_PUBLIC_USD_TO_IDR_RATE`
+- `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` (UI says "coming soon";
+  no server implementation yet)
 
 ## Contents
 
@@ -17,6 +61,8 @@ a Supabase Postgres database.
 4. [Get the pooled + direct connection strings](#4-get-the-pooled--direct-connection-strings)
 5. [Prisma schema (Postgres-first)](#5-prisma-schema-postgres-first)
 6. [Environment variables reference](#6-environment-variables-reference)
+   - [6.1 Google OAuth redirect URI](#61-google-oauth-redirect-uri)
+   - [6.2 Payment env vars — optional / deferred](#62-payment-env-vars--optional--deferred)
 7. [Create the Vercel project](#7-create-the-vercel-project)
 8. [First-deploy database setup](#8-first-deploy-database-setup)
 9. [Post-deploy QA checklist](#9-post-deploy-qa-checklist)
@@ -197,6 +243,97 @@ available for *Production*, *Preview*, and *Development* as appropriate.
 | `SUPABASE_SERVICE_ROLE_KEY` | optional | Server-only Supabase key for admin operations via the JS client. Never prefix with `NEXT_PUBLIC_`. |
 
 All validation rules live in [`src/lib/env.ts`](../src/lib/env.ts).
+
+### 6.1 Google OAuth redirect URI
+
+Only applies if you want "Continue with Google" on the auth pages. The
+Google button is rendered on every build but stays disabled (with
+"not configured for this deployment" copy) unless all three of these
+are set in Vercel env:
+
+```
+GOOGLE_CLIENT_ID        = <from Google Cloud Console>
+GOOGLE_CLIENT_SECRET    = <from Google Cloud Console>
+NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED = 1
+```
+
+Missing any of them keeps the button visible but disabled. This is the
+PRD's "graceful disable" pattern — the UI never silently removes the
+option, so the deployment state stays obvious to the operator.
+
+**In the Google Cloud Console** ([console.cloud.google.com](https://console.cloud.google.com)):
+
+1. APIs & Services → Credentials → pick (or create) an OAuth 2.0
+   Client ID of type *Web application*.
+2. Under **Authorized redirect URIs**, add the exact callback URL that
+   NextAuth will hit for this deployment:
+
+   ```
+   https://<your-production-domain>/api/auth/callback/google
+   ```
+
+   For preview deploys, you'll either need to add each preview URL
+   individually or skip Google sign-in on previews (recommended —
+   credentials sign-in still works).
+
+3. Copy the **Client ID** and **Client secret** into Vercel env vars.
+
+**Common misconfigurations:**
+
+| Symptom | Fix |
+| --- | --- |
+| "Error 400: redirect_uri_mismatch" on Google's page | Add the exact callback URL (see above) to the Google Cloud Console client config |
+| Google button stays disabled in production | Check `NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED=1` is set — client-visible env var, needs a redeploy after changing |
+| Google succeeds but lands on the wrong origin | `NEXTAUTH_URL` is missing or points at the wrong domain — it must match the origin registered with Google |
+
+### 6.2 Payment env vars — optional / deferred
+
+> **Status:** The Stripe checkout and webhook routes are implemented
+> ([`src/app/api/billing/checkout/route.ts`](../src/app/api/billing/checkout/route.ts),
+> [`src/app/api/billing/webhook/route.ts`](../src/app/api/billing/webhook/route.ts))
+> but **the end-to-end payment flow has not been verified against a
+> live Stripe account from this deployment**. Treat these env vars as
+> optional and defer until you have:
+>
+> 1. Completed a real test checkout using a Stripe test key and a test
+>    card, and confirmed the webhook promotes the user's plan in the
+>    `User` table.
+> 2. Repeated step 1 with a live key on a real bank card you can
+>    refund, and kept a plain-English note of exactly what cleared.
+>
+> Until then, marketing copy should say "upgrade coming soon" rather
+> than imply paid plans are live.
+
+The implementation does the right thing when env is missing:
+
+| Scenario | Behavior |
+| --- | --- |
+| `STRIPE_SECRET_KEY` not set + user clicks **Upgrade** | `POST /api/billing/checkout` returns 503 `stripe_not_configured`; pricing page surfaces "Payment processing is not configured" |
+| Price ID missing for the requested plan × currency | 503 `price_not_configured` with the plan + currency echoed in the body |
+| `STRIPE_WEBHOOK_SECRET` not set + Stripe posts to `/api/billing/webhook` | 500 `webhook_not_configured` in logs; Stripe will retry |
+| Webhook signature mismatch | 400 `invalid_signature` — refuses to touch the DB |
+| Plan is successfully updated from a webhook | Never overwrites `OWNER` / `ADMIN` roles (the `updateMany` is gated on `role: "USER"`) |
+
+Owner accounts bypass plan gates regardless of Stripe state, so you
+can run production without any Stripe env vars at all while the
+payment flow is still being validated.
+
+Stripe Price ID variables (only needed once you're ready to verify
+checkout):
+
+```
+STRIPE_STARTER_PRICE_ID_USD=""
+STRIPE_PRO_PRICE_ID_USD=""
+STRIPE_ANNUAL_PRICE_ID_USD=""
+# Separate Prices in IDR currency — don't reuse USD ones
+STRIPE_STARTER_PRICE_ID_IDR=""
+STRIPE_PRO_PRICE_ID_IDR=""
+STRIPE_ANNUAL_PRICE_ID_IDR=""
+```
+
+PayPal env vars (`PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`) are
+reserved for a future PR — no server-side PayPal implementation
+exists today; the `/pricing` page shows "PayPal: Coming soon".
 
 ## 7. Create the Vercel project
 
