@@ -1276,3 +1276,121 @@ fetches the detail page, parses it, and writes to `CachedAsset`.
 - Monthly trends and download history remain `Unavailable` on the
   public-metadata provider — there is no source for these on public
   pages.
+
+
+
+---
+
+## 17. Provider Health + Cache Management + Real Data QA (PR #25)
+
+PR #25 makes provider and cache status visible to the operator, adds a
+safe cache-refresh action, centralizes user-facing messages for every
+unavailable/stale/empty state, and hardens QA paths across all pages.
+
+### New modules
+
+| Module | Purpose |
+| --- | --- |
+| `src/lib/providers/health.ts` | Computes a health report for every provider (configured/not, available/not, last successful fetch, notice) and a cache summary (counts, TTLs, oldest/newest timestamps). Never initiates network requests. |
+| `src/lib/scraper/cache-management.ts` | `getCacheStats()` (total/fresh/stale per table), `softInvalidateCache()` (marks entries stale without deleting — next organic request re-fetches), `purgeExpiredCache(days)` (hard-deletes very old rows). |
+| `src/lib/providers/messages.ts` | Centralized `PROVIDER_MESSAGES` dictionary. Every user-facing notice the UI renders comes from here — never raw parser errors, stack traces, or internal paths. |
+| `src/app/api/providers/health/route.ts` | `GET` returns the full health report + cache stats for any signed-in user. `POST` (owner-only) triggers `softInvalidateCache()`. |
+
+### Settings → Data Sources card
+
+The `/settings` page now shows a **Data Sources** section with:
+
+- **Active provider** — which `DATA_PROVIDER` env value is in use.
+- **Provider list** — each provider's status (Configured / Not configured),
+  availability (available / unavailable), and a human-readable notice.
+  Last successful fetch timestamp shown for the public provider.
+- **Cache summary** — three counters (searches / assets / contributors)
+  with fresh vs total breakdown + TTL display.
+- **Demo mode status** — badge showing whether demo mode is available.
+- **Manual import status** — badge showing whether the user has imported data.
+- **Cache refresh button** (owner-only) — marks all fresh cache entries as
+  stale so the next organic search re-fetches. Does NOT trigger a live
+  scrape or bulk fetch.
+
+### Provider health report shape
+
+```ts
+{
+  providers: [
+    { id, name, status, availability, notice, lastSuccessfulFetch? },
+    ...
+  ],
+  cache: { searchCount, assetCount, contributorCount,
+           searchTtlHours, assetTtlDays, contributorTtlDays,
+           oldestSearchFetch?, newestSearchFetch?,
+           oldestAssetFetch?, newestAssetFetch? },
+  cacheStats: {
+    searches: { total, fresh, stale },
+    assets: { total, fresh, stale },
+    contributors: { total, fresh, stale },
+  },
+  activeProvider: string,
+  demoModeAvailable: boolean,
+  manualImportAvailable: boolean,
+}
+```
+
+### Cache management actions
+
+| Action | Trigger | What it does | What it does NOT do |
+| --- | --- | --- | --- |
+| Soft invalidate | `POST /api/providers/health` (owner) | Sets `expiresAt` to past on all fresh entries. Next organic request re-fetches if scraper is enabled. Stale entries still serve as fallback. | Does NOT delete rows, does NOT initiate any live scrape. |
+| Purge expired | `purgeExpiredCache(days)` (programmatic) | Hard-deletes entries that expired > N days ago. Keeps DB lean. | Does NOT touch fresh or recently-stale entries. |
+
+### Real data QA states
+
+Every page in the app now handles these states cleanly:
+
+| State | UI behavior |
+| --- | --- |
+| Public provider unavailable (not configured) | "No public metadata source configured" notice + CTAs |
+| Public provider blocked/timeout | "Adobe Stock declined/timed out" + stale cache fallback |
+| Cache empty | "No cached data yet" + prompt to search with scraper enabled |
+| Cache stale | Served with "(cached Xh ago)" notice; live fetch attempted first |
+| Public page parsing fails | Falls back to stale cache with notice; never shows raw errors |
+| No imported data | "No imported data" + CTA to `/import` |
+| Demo mode restricted (PR #23 rules) | `NoDataState` component with three CTAs |
+| Signed-in user, public provider configured, live fetch OK | Results shown with "Public Metadata" badge |
+
+### User-facing messages (centralized)
+
+All status messages the UI surfaces are defined in
+`src/lib/providers/messages.ts`. Key messages:
+
+- `publicMetadataUnavailable` — "Public metadata is currently unavailable…"
+- `usingStaleCache` — "Using cached data (may be outdated)…"
+- `cacheEmpty` — "No cached data available. Run a search…"
+- `noImportedData` — "No imported data found. Import a CSV…"
+- `demoModeActive` — "Demo mode active. All numbers are synthetic…"
+- `downloadsUnavailable` — "Download counts are not available from this source…"
+- `noDataConfigured` — "No data source configured. Import a CSV, configure…"
+
+Raw parser errors, stack traces, and internal module paths are NEVER
+exposed to normal users.
+
+### What this PR does NOT change
+
+- No new scraping or fetching behavior. Health checks are read-only.
+- No changes to mock/manual/public provider logic.
+- No changes to plan gating, auth, import, or export flows.
+- No private Adobe APIs, proxy rotation, UA evasion, or anti-bot bypass.
+- No fake download counts. `metricsAvailable: false` continues to drive
+  the "Unavailable" UI state everywhere.
+- Cache refresh is "soft" only — it never triggers aggressive scraping.
+
+### Known limitations
+
+- The health endpoint reads env vars at call time; it does NOT probe
+  the actual Adobe Stock origin to verify reachability (that would be
+  an unnecessary live request).
+- `purgeExpiredCache()` is not wired to a cron job or scheduled route
+  in this PR. Operators can call it from a one-off script or a future
+  admin route. The DB grows slowly (one row per unique search × page)
+  so manual purging suffices for now.
+- The Settings → Data Sources card is visible only to signed-in users.
+  Guests see the standard "not signed in" placeholder.
