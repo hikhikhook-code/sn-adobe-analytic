@@ -16,7 +16,8 @@
  */
 
 import { prisma } from "@/lib/prisma";
-import { SEARCH_TTL_MS, ASSET_TTL_MS, CONTRIBUTOR_TTL_MS } from "./cache";
+// Cache TTL values are defined in ./cache and used for display only
+// in the health report (src/lib/providers/health.ts reads them directly).
 
 export interface CacheStats {
   searches: { total: number; fresh: number; stale: number };
