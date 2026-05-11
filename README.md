@@ -41,6 +41,18 @@ niche heat maps, and export results to CSV.
   - Persisted search history surfaced on the dashboard
   - Completed `/export` with history table + per-export quality tagging
 - **Phase 4** — Supabase / Postgres + Vercel deploy readiness:
+  - **PR #27 — Prisma schema is now Postgres-first.** The app targets
+    Postgres (Supabase in production, local Postgres in dev). SQLite
+    is no longer supported. `prisma/schema.prisma` uses
+    `provider = "postgresql"` and reads `DATABASE_URL` (pooled,
+    runtime) + `DIRECT_URL` (direct, DDL). All existing models
+    (`User`, `Account`, `Session`, `Favorite`, `Collection`,
+    `SavedSearch`, `ImportedDataset`, `ImportedAsset`,
+    `SearchHistory`, `ExportHistory`, cache tables, etc.) carry
+    over unchanged — the `*Json` columns remain JSON-encoded
+    strings so zero runtime code changed. See
+    [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the step-by-step
+    Supabase + Vercel setup.
   - Centralized env loading & validation in `src/lib/env.ts` (strict in
     production, permissive in local dev and during CI builds)
   - `docs/DEPLOYMENT.md` — end-to-end Vercel + Supabase deploy guide with
@@ -111,10 +123,34 @@ niche heat maps, and export results to CSV.
 - **Tailwind CSS** with PRD design tokens (dark navy sidebar, lavender bg)
 - Custom Shadcn/UI-style primitives (button, card, input, badge, label, select)
 - **NextAuth.js** (email/password + optional Google OAuth)
-- **Prisma** ORM with **SQLite** locally (swap to Supabase Postgres for prod)
+- **Prisma** ORM with **Postgres** (Supabase in production, local
+  Postgres in dev — see below)
 - Pluggable data-provider layer in `src/lib/providers/`
 
-## Local development (SQLite)
+## Local development
+
+As of PR #27 the app targets **Postgres** only. Bring up a local Postgres
+(one-time) and point both `DATABASE_URL` and `DIRECT_URL` at it, or use a
+free Supabase project for local dev if you'd rather not install Postgres.
+
+### 1. Get a Postgres
+
+Pick one of:
+
+- **Docker** (quickest):
+
+  ```bash
+  docker run --name sn-adobe-pg -e POSTGRES_PASSWORD=postgres \
+    -e POSTGRES_DB=sn_adobe_analytic -p 5432:5432 -d postgres:16
+  ```
+
+- **Homebrew / Postgres.app** (macOS): install Postgres 14+, then
+  `createdb sn_adobe_analytic`.
+- **Supabase** (zero-install): create a free project at
+  [app.supabase.com](https://app.supabase.com) and use its pooled +
+  direct connection strings. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+### 2. Bootstrap the app
 
 **Quick path (recommended, works on desktop + Termux/phone):**
 
@@ -142,14 +178,18 @@ npx prisma db push
 npm run dev
 ```
 
-**What `npm run setup:local` does**
+### What `npm run setup:local` does
 
 `scripts/setup-local-env.js` is a tiny, idempotent helper:
 
 - If `.env` is missing, it's created from `.env.example`.
-- Ensures `DATABASE_URL`, `NEXTAUTH_URL`, `NEXTAUTH_SECRET`,
-  `DATA_PROVIDER`, `MAX_IMPORT_FILE_SIZE_MB`, and `USE_LIVE_SCRAPER`
-  exist with sane local-dev values.
+- Ensures `DATABASE_URL`, `DIRECT_URL`, `NEXTAUTH_URL`,
+  `NEXTAUTH_SECRET`, `DATA_PROVIDER`, `MAX_IMPORT_FILE_SIZE_MB`, and
+  `USE_LIVE_SCRAPER` exist with sane local-dev values. The default
+  Postgres URL is
+  `postgresql://postgres:postgres@localhost:5432/sn_adobe_analytic?schema=public`
+  — override it with your Supabase connection string if you'd rather
+  point local dev at Supabase.
 - **Only** replaces `NEXTAUTH_SECRET` when it still holds the
   placeholder from `.env.example` (or is empty). If you've already
   generated a real secret, it's left alone.
@@ -168,7 +208,7 @@ checklist.
 ```bash
 npm install
 cp .env.example .env
-# ... edit .env to taste ...
+# ... edit .env to taste (DATABASE_URL + DIRECT_URL) ...
 npx prisma generate
 npx prisma db push
 npm run dev
@@ -178,38 +218,52 @@ The app redirects `/` to `/search`. Try keywords like `business`, `nature`, or
 `ai illustration`. All numbers come from `mockProvider`
 (`src/lib/providers/mock.ts`) and are clearly labeled `Demo Data` in the UI.
 
+### Prisma workflow
+
+| When | Command | Notes |
+| --- | --- | --- |
+| After editing `schema.prisma` | `npx prisma generate` | Regenerates the TS client. Runs automatically in `npm run build` and `postinstall`. |
+| Local dev — first run or throwaway schema changes | `npx prisma db push` | Pushes the schema directly. No migration files created. Perfect for local iteration. |
+| Production — first deploy | `npx prisma db push` against the **direct** URL (port 5432) | One-time, against an empty Supabase DB. |
+| Production — subsequent schema changes | `npx prisma migrate deploy` against the **direct** URL | Applies committed migrations. pgBouncer (port 6543) does NOT support DDL — always use the direct URL. |
+
+See [`docs/DEPLOYMENT.md §5, §8`](docs/DEPLOYMENT.md) for the full
+production Prisma workflow.
+
 ## Vercel deployment
 
-> **Do not rely on SQLite when deploying to Vercel.** Vercel functions run on
-> ephemeral filesystems — a SQLite file there will be lost between requests
-> and between deploys. Use a managed Postgres (e.g. Supabase) for any
-> deployed environment.
+> **Do not run the app on an ephemeral filesystem.** Vercel functions are
+> stateless and short-lived — any `file:` database there would be lost
+> between requests. The Prisma schema targets Postgres (PR #27); use a
+> managed Postgres such as Supabase for any deployed environment.
 
 For the full end-to-end walkthrough — creating the Supabase project, grabbing
-the pooled connection URL, migrating the Prisma schema, setting Vercel env
-vars, running the first `prisma db push`, and the post-deploy QA checklist —
-see **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+the pooled + direct connection URLs, running the first `prisma db push`,
+setting Vercel env vars, and the post-deploy QA checklist — see
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 The 30-second version:
 
-1. Create a Supabase project, copy the **pooled** (pgBouncer, port `6543`)
-   connection string, and add `?pgbouncer=true&connection_limit=1`.
-2. In `prisma/schema.prisma`, switch `provider = "sqlite"` → `"postgresql"`
-   on your deploy branch. (Leave `main` on SQLite so local dev stays easy;
-   see `DEPLOYMENT.md §5` for the two migration strategies.)
-3. Set the env vars listed in [`.env.example`](.env.example) on Vercel,
-   especially `DATABASE_URL`, `NEXTAUTH_URL`, and `NEXTAUTH_SECRET`
-   (`openssl rand -base64 32`).
-4. Deploy, then run `npx prisma db push` once against the pooled URL.
-5. Walk through the QA checklist below.
+1. Create a Supabase project, copy both connection strings:
+   - **Pooled** (pgBouncer, port `6543`) — for `DATABASE_URL`. Append
+     `?pgbouncer=true&connection_limit=1`.
+   - **Direct** (port `5432`) — for `DIRECT_URL`. Used for `prisma db
+     push` / `prisma migrate deploy`.
+2. Set the env vars listed in [`.env.example`](.env.example) on Vercel,
+   at a minimum: `DATABASE_URL`, `DIRECT_URL`, `NEXTAUTH_URL`, and
+   `NEXTAUTH_SECRET` (`openssl rand -base64 32`).
+3. Deploy. The first deploy builds successfully even against an empty DB.
+4. Locally, point `DATABASE_URL` at the **direct** URL and run
+   `npx prisma db push` once to create the tables in Supabase.
+5. Walk through the QA checklist in `docs/DEPLOYMENT.md §9`.
 
 ### Env validation
 
 `src/lib/env.ts` centralizes env handling:
 
-- **Local dev / CI build**: missing `DATABASE_URL` falls back to
-  `file:./dev.db` with a warning; missing `NEXTAUTH_SECRET` uses a dev-only
-  fallback.
+- **Local dev / CI build**: missing `DATABASE_URL` falls back to a local
+  Postgres placeholder with a warning; missing `NEXTAUTH_SECRET` uses a
+  dev-only fallback.
 - **Production runtime**: missing `DATABASE_URL`, missing
   `NEXTAUTH_SECRET`, the `.env.example` placeholder, a CI-only secret
   (anything ending `-not-used-at-runtime`), or a secret shorter than
@@ -492,7 +546,8 @@ stale value never silently grants elevated access.
 - Settings: profile + sign out
 - Performance score & competition level utilities (per PRD §10.3 / §10.4)
 - Prisma schema for `User`, `Account`, `Session`, `Device`, `SearchHistory`,
-  `Favorite`, `CachedAsset`, `CachedSearch`, `ExportHistory` (SQLite-adapted)
+  `Favorite`, `CachedAsset`, `CachedSearch`, `ExportHistory` (Postgres;
+  PR #27 switched the provider from SQLite)
 
 ## Added in Phase 2
 

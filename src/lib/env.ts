@@ -7,7 +7,7 @@
  *     shipped in `.env.example`).
  *   - Stay quiet and friendly in local development — a fresh clone that
  *     forgot to `cp .env.example .env` should still boot with sensible
- *     fallbacks (SQLite, dev-only NextAuth secret).
+ *     fallbacks (local Postgres placeholder URL, dev-only NextAuth secret).
  *   - Do NOT throw at build time even in production. `next build` runs with
  *     `NODE_ENV=production` but `NEXT_PHASE=phase-production-build`, and
  *     the CI workflow deliberately passes a placeholder NEXTAUTH_SECRET
@@ -64,8 +64,15 @@ function fail(message: string): never {
 // ---------------------------------------------------------------------------
 // DATABASE_URL
 // ---------------------------------------------------------------------------
-// Required at true production runtime. In dev / build we fall back to the
-// local SQLite path so a fresh clone can boot even before `.env` is copied.
+// Required at true production runtime. In dev / build we fall back to a
+// local Postgres placeholder so a fresh clone can still run
+// `npx prisma generate` + `next build` without a `.env` file. The URL is
+// intentionally not a working local DB — the app will error on the FIRST
+// query instead of silently running against an unexpected database. Dev
+// setup doc explains the one-time `.env` step.
+const LOCAL_POSTGRES_FALLBACK =
+  "postgresql://postgres:postgres@localhost:5432/sn_adobe_analytic?schema=public";
+
 function readDatabaseUrl(): string {
   const raw = process.env.DATABASE_URL?.trim() ?? "";
   if (raw) return raw;
@@ -73,19 +80,21 @@ function readDatabaseUrl(): string {
   if (IS_STRICT_RUNTIME) {
     fail(
       "DATABASE_URL is not set. In production, set it in your Vercel project's " +
-        "Environment Variables to your Supabase pooled connection string. See " +
+        "Environment Variables to your Supabase pooled connection string " +
+        "(port 6543, with `?pgbouncer=true&connection_limit=1`). See " +
         "docs/DEPLOYMENT.md for the exact format.",
     );
   }
 
-  // Build phase or dev: warn (once) and use the local SQLite fallback so
-  // `npx prisma generate` and `next build` still work.
+  // Build phase or dev: warn (once) and use the local Postgres fallback so
+  // `npx prisma generate` and `next build` still work without a `.env` file.
   warn(
-    "DATABASE_URL is not set. Falling back to 'file:./dev.db' for local " +
-      "development. Run `cp .env.example .env` and `npx prisma db push` to " +
-      "initialize the local database.",
+    "DATABASE_URL is not set. Falling back to a local Postgres placeholder " +
+      "('postgresql://postgres:postgres@localhost:5432/...'). Run " +
+      "`cp .env.example .env`, start a local Postgres or point DATABASE_URL at " +
+      "a Supabase project, then `npx prisma db push` to initialize the schema.",
   );
-  return "file:./dev.db";
+  return LOCAL_POSTGRES_FALLBACK;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +258,8 @@ export function validateEnv(): string[] {
 
   if (!process.env.DATABASE_URL) {
     warnings.push(
-      "DATABASE_URL is not set; falling back to 'file:./dev.db' (dev only).",
+      "DATABASE_URL is not set; falling back to a local Postgres placeholder " +
+        "(dev only).",
     );
   }
   if (!process.env.NEXTAUTH_SECRET) {

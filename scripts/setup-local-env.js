@@ -27,6 +27,11 @@
  *     their `.env`, we leave them untouched.
  *
  * Safe to run repeatedly. Only prints what it changes.
+ *
+ * PR #27: the default DATABASE_URL is now a local Postgres placeholder
+ * (the Prisma schema no longer supports SQLite). Runs assume you have
+ * a local Postgres available on :5432, OR that you will point
+ * DATABASE_URL at a Supabase project manually.
  */
 
 const fs = require("fs");
@@ -46,8 +51,12 @@ const EXAMPLE_PATH = path.join(ROOT, ".env.example");
  * production. It IS long enough (> 16 chars) to satisfy the dev-mode
  * NextAuth requirement.
  */
+const LOCAL_POSTGRES_URL =
+  "postgresql://postgres:postgres@localhost:5432/sn_adobe_analytic?schema=public";
+
 const LOCAL_SAFE_DEFAULTS = {
-  DATABASE_URL: "file:./dev.db",
+  DATABASE_URL: LOCAL_POSTGRES_URL,
+  DIRECT_URL: LOCAL_POSTGRES_URL,
   NEXTAUTH_URL: "http://localhost:3000",
   NEXTAUTH_SECRET: "local-dev-secret-123456789123456789",
   DATA_PROVIDER: "mock",

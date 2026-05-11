@@ -32,10 +32,12 @@ yarn-error.log*
 # vercel
 .vercel
 
-# Prisma — keep schema tracked, ignore local DB + generated artifacts
+# Prisma — keep schema tracked, ignore generated artifacts
+prisma/migrations/dev/
+# Legacy SQLite artifacts (pre-PR #27). Harmless to keep ignored in
+# case anyone's old `dev.db` is still lying around after upgrading.
 prisma/dev.db
 prisma/dev.db-journal
-prisma/migrations/dev/
 
 # OS
 Thumbs.db
