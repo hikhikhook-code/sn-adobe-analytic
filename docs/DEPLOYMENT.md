@@ -1,21 +1,21 @@
 # Deployment guide — Vercel + Supabase (Postgres)
 
 This is the step-by-step guide for deploying SN Adobe Analytic to Vercel with
-a Supabase Postgres database. Local development continues to work against
-SQLite — nothing in this guide affects your `dev.db`.
+a Supabase Postgres database.
 
-> **You do not need a Supabase account to run this project locally.** The
-> default `DATABASE_URL=file:./dev.db` in `.env.example` is enough for
-> `npm run dev`. Follow this guide only when you're ready to deploy to a
-> shared environment.
+> As of **PR #27** the Prisma schema targets PostgreSQL exclusively — SQLite
+> is no longer supported. Local development also runs against Postgres
+> (Docker, Homebrew, Postgres.app, or a free Supabase project). See the
+> [README Local development](../README.md#local-development) section for
+> the one-time local setup.
 
 ## Contents
 
 1. [Overview](#1-overview)
 2. [Prerequisites](#2-prerequisites)
 3. [Create a Supabase project](#3-create-a-supabase-project)
-4. [Get the pooled connection string](#4-get-the-pooled-connection-string)
-5. [Migrate `prisma/schema.prisma` from SQLite to Postgres](#5-migrate-prismaschemaprisma-from-sqlite-to-postgres)
+4. [Get the pooled + direct connection strings](#4-get-the-pooled--direct-connection-strings)
+5. [Prisma schema (Postgres-first)](#5-prisma-schema-postgres-first)
 6. [Environment variables reference](#6-environment-variables-reference)
 7. [Create the Vercel project](#7-create-the-vercel-project)
 8. [First-deploy database setup](#8-first-deploy-database-setup)
@@ -33,12 +33,18 @@ deployment target is:
 - **Hosting**: Vercel (Edge network + serverless functions)
 - **Database**: Supabase Postgres accessed via the **pooled** (pgBouncer)
   connection URL. A direct (`:5432`) connection does not work reliably with
-  Vercel's ephemeral serverless functions.
+  Vercel's ephemeral serverless functions at request time; we also keep the
+  direct URL wired up (`DIRECT_URL`) so Prisma DDL (`db push` /
+  `migrate deploy`) can run.
 - **Auth**: NextAuth.js (JWT strategy, no external session store required).
 - **Static assets**: served from the `/public` folder as usual.
 
-The repo's CI (`.github/workflows/ci.yml`) runs against SQLite, so CI stays
-green without a Supabase account or network access to Postgres.
+CI (`.github/workflows/ci.yml`) runs `prisma generate` + `next build`
+against a placeholder Postgres URL
+(`postgresql://postgres:postgres@localhost:5432/sn_adobe_analytic_ci?schema=public`).
+The URL is only validated for format — nothing in the build path opens a
+connection to the database — so CI stays green without a Supabase account
+or any real credentials.
 
 ## 2. Prerequisites
 
@@ -58,7 +64,18 @@ green without a Supabase account or network access to Postgres.
    somewhere you can retrieve later — Supabase shows it only once.
 3. Wait ~1 minute for the project to provision.
 
-## 4. Get the pooled connection string
+## 4. Get the pooled + direct connection strings
+
+Supabase exposes two connection endpoints you'll use:
+
+- **Pooled** (pgBouncer, port `6543`) — for the app at request time
+  (`DATABASE_URL`).
+- **Direct** (port `5432`) — for Prisma DDL only
+  (`DIRECT_URL`, used by `prisma db push` / `prisma migrate deploy`).
+  pgBouncer's transaction pooler does not support prepared statements
+  reliably enough for DDL.
+
+### Pooled URL (DATABASE_URL)
 
 1. In the Supabase dashboard: **Project Settings → Database → Connection
    string**.
@@ -87,87 +104,69 @@ green without a Supabase account or network access to Postgres.
      own pool; Vercel functions are short-lived and we want the pool to
      live in the pooler, not the function.
 
-4. Optionally grab the **direct** (`:5432`) connection string too — you'll
-   need it *only* when running `prisma migrate deploy` (DDL operations
-   don't work through the transaction pooler).
+### Direct URL (DIRECT_URL)
 
-## 5. Migrate `prisma/schema.prisma` from SQLite to Postgres
+Same panel, **Direct connection** tab (port `5432`):
 
-The local SQLite schema stores a few `String[]` fields as JSON-encoded
-strings because SQLite has no native array type. Postgres supports arrays
-natively, and switching lets you use Prisma's `has`, `hasEvery`, and
-`hasSome` filters.
+```
+postgresql://postgres.<project-ref>:<PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres
+```
 
-**You have two options:**
+Do **not** append `pgbouncer=true` here. This URL is only used by the
+Prisma CLI to run DDL against the database.
 
-### Option A — Keep it simple (recommended for the first deploy)
+Store both strings in a password manager — Supabase won't show the DB
+password again.
 
-Change only the provider, leave `*Json` columns as-is. This lets you deploy
-in minutes without touching any API route.
+## 5. Prisma schema (Postgres-first)
 
-1. In `prisma/schema.prisma`, change:
+As of PR #27, `prisma/schema.prisma` already targets PostgreSQL — no
+schema change is required to deploy. Concretely:
 
-   ```prisma
-   datasource db {
-     provider = "sqlite"
-     url      = env("DATABASE_URL")
-   }
-   ```
+```prisma
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+```
 
-   to:
+All existing models are compatible unchanged:
 
-   ```prisma
-   datasource db {
-     provider = "postgresql"
-     url      = env("DATABASE_URL")
-   }
-   ```
+- `User`, `Account`, `Session`, `VerificationToken`, `PasswordResetToken`,
+  `Device` (auth + device management)
+- `Favorite`, `Collection`, `SavedSearch` (user library)
+- `SearchHistory`, `ExportHistory` (activity)
+- `ImportedDataset`, `ImportedAsset` (manual CSV imports)
+- `CachedSearch`, `CachedAsset`, `CachedContributor` (public-metadata cache)
+- `User.role`, `User.ownerAccessGrantedAt`, `User.ownerAccessSource`
+  (owner / admin access — PR #18)
+- `User.plan` (payment plan field — PR #17 / #26)
 
-2. Commit the schema change on a deploy branch (e.g.
-   `chore/postgres-schema`). Do **not** merge it back to `main` if you
-   want `main` to continue targeting SQLite for local dev — instead, keep
-   this branch long-lived as your production branch, or use Prisma's
-   multi-schema tooling. The README's "Local development" section already
-   assumes `sqlite`.
+The columns that previously worked around SQLite's lack of array support
+(`keywordsJson`, `categoriesJson`, `paramsJson`, `fieldQualityJson`) still
+store JSON-encoded strings. They continue to work on Postgres and every
+call site that reads/writes them stays unchanged. A follow-up PR can
+convert them to native `String[]` / `Json` one at a time if we want
+Prisma's array operators — that's explicitly out of scope for PR #27.
 
-### Option B — Native arrays (recommended eventually)
+### (Optional, future) — convert to native Postgres arrays
 
-Convert the JSON-encoded fields to native `String[]`. This is a larger
-change because several routes parse those JSON strings manually.
+If a later PR wants to take advantage of Postgres-native arrays for
+`has`, `hasEvery`, `hasSome` filters, replace the affected columns:
 
-1. In `prisma/schema.prisma`, alongside the provider change, replace:
+```prisma
+keywordsJson    String  @default("[]")  // -> keywords   String[] @default([])
+categoriesJson  String  @default("[]")  // -> categories String[] @default([])
+// paramsJson / fieldQualityJson are objects, not arrays — leave them as
+// Strings OR switch to Prisma's `Json` type. Either works.
+```
 
-   ```prisma
-   keywordsJson    String  @default("[]")
-   categoriesJson  String  @default("[]")
-   resultIdsJson   String  @default("[]")
-   fieldQualityJson String @default("{}")  // stays a String — it's a map
-   paramsJson      String  @default("{}")  // stays a String — it's a map
-   ```
-
-   with:
-
-   ```prisma
-   keywords        String[] @default([])
-   categories      String[] @default([])
-   resultIds       String[] @default([])
-   // fieldQualityJson and paramsJson are objects, not arrays — leave them
-   // as JSON-encoded strings OR switch them to Prisma's Json type. Either
-   // works; Json is cleaner but requires code changes.
-   ```
-
-2. Update consumers:
-   - `src/app/api/favorites/route.ts` — stops calling `parseJsonArray`
-     on the field, reads the array directly.
-   - `src/lib/providers/manual-import.ts` — same; `categoriesJson` and
-     `keywordsJson` stop being JSON-encoded.
-   - `src/lib/utils.ts` — `parseJsonArray` can be deleted if nothing else
-     uses it.
-3. Regenerate and deploy as in Option A.
-
-**Why not do Option B on day one?** It touches runtime code, which expands
-the blast radius of your first Postgres deploy. Ship Option A first, verify
-the app works, then ship Option B as a follow-up PR.
+and update the small number of consumers that parse those JSON strings
+(`src/lib/utils.ts:parseJsonArray`, `src/lib/providers/manual-import.ts`,
+`src/app/api/favorites/route.ts`, `src/app/api/saved/export/route.ts`,
+`src/app/api/dashboard/route.ts`, `src/lib/import/csv.ts`). This is a
+pure optimization / ergonomics change and is not required for production.
 
 ## 6. Environment variables reference
 
@@ -176,14 +175,26 @@ available for *Production*, *Preview*, and *Development* as appropriate.
 
 | Variable | Required | Example / notes |
 | --- | --- | --- |
-| `DATABASE_URL` | yes (prod) | Supabase pooled URL from [§4](#4-get-the-pooled-connection-string). In dev, defaults to `file:./dev.db`. |
+| `DATABASE_URL` | yes | Supabase pooled URL (port `6543`) from [§4](#4-get-the-pooled--direct-connection-strings), with `?pgbouncer=true&connection_limit=1`. In local dev, point at your local Postgres. The app **refuses to start** in production if this is unset. |
+| `DIRECT_URL` | yes (for `prisma db push` / `migrate deploy`) | Supabase direct URL (port `5432`). Used only by the Prisma CLI for DDL. In local dev, same as `DATABASE_URL`. |
 | `NEXTAUTH_URL` | yes | `https://<your-app>.vercel.app` for production; set to the preview URL for preview environments. |
 | `NEXTAUTH_SECRET` | yes | Generate with `openssl rand -base64 32`. Must be a real random string — the app **will refuse to start** at runtime if it detects the `.env.example` placeholder, a CI-only value, or anything shorter than 16 chars. |
-| `DATA_PROVIDER` | no | `mock` (default), `official`, or `manual`. Non-mock providers currently fall back to mock until implemented. |
+| `DATA_PROVIDER` | no | `mock` (default), `official`, `public`, or `manual`. `public` is the preferred alias for `official` (PR #22). |
 | `MAX_IMPORT_FILE_SIZE_MB` | no | Default `10`. Cap on a single `/import` CSV upload. Hard-capped at 100 in `src/lib/env.ts` regardless of what you set. |
 | `USE_LIVE_SCRAPER` | no | Always ignored in production. Leave unset. |
+| `PUBLIC_SCRAPER_ENABLED` | no | `true` to enable the built-in public metadata scraper (PR #22). Off by default. |
+| `PUBLIC_SCRAPER_ALLOW_PROD` | no | Double opt-in for the scraper in production. Required alongside `PUBLIC_SCRAPER_ENABLED=true` when `NODE_ENV=production`. |
+| `OWNER_EMAILS` | no | Comma-separated list for owner-bootstrap (PR #18). Never ship real emails in `.env.example`. |
 | `GOOGLE_CLIENT_ID` | optional | Only if you want Google sign-in. |
 | `GOOGLE_CLIENT_SECRET` | optional | Only if you want Google sign-in. |
+| `STRIPE_SECRET_KEY` | optional | PR #26 payment foundation. Missing → checkout returns a 503 "not configured". |
+| `STRIPE_WEBHOOK_SECRET` | optional | Verifies Stripe webhook signatures. |
+| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | optional | Client-side Stripe key. |
+| `STRIPE_*_PRICE_ID_USD` / `..._IDR` | optional | Per-plan × currency Stripe Price IDs. |
+| `NEXT_PUBLIC_USD_TO_IDR_RATE` | optional | Static display-only rate on `/pricing`. Default `16000`. |
+| `NEXT_PUBLIC_SUPABASE_URL` | optional | Only if you use `@supabase/supabase-js` directly (Storage, RLS, etc.). Prisma does not need this. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | optional | Same — only for the JS client. |
+| `SUPABASE_SERVICE_ROLE_KEY` | optional | Server-only Supabase key for admin operations via the JS client. Never prefix with `NEXT_PUBLIC_`. |
 
 All validation rules live in [`src/lib/env.ts`](../src/lib/env.ts).
 
@@ -211,21 +222,25 @@ need to apply the Prisma schema once.
 **From your laptop** (simpler, recommended for the first time):
 
 ```bash
-# 1. Pin the same env the Vercel build is using.
+# 1. Export BOTH env vars. Prisma DDL flows through the DIRECT_URL;
+#    pgBouncer doesn't support prepared statements reliably enough for it.
 export DATABASE_URL='postgresql://postgres.<ref>:<PASSWORD>@aws-0-<region>.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1'
+export DIRECT_URL='postgresql://postgres.<ref>:<PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres'
 
-# 2. Create the initial migration and push it.
-#    `db push` is fine for the very first deploy because the database
-#    is empty; switch to `prisma migrate deploy` once you start shipping
-#    schema changes.
+# 2. Create the tables. `db push` is fine for the very first deploy
+#    because the database is empty; switch to `prisma migrate deploy`
+#    once you start shipping schema changes.
 npx prisma db push
 ```
 
-Alternatively, if you already have `prisma/migrations/` files, use
-`npx prisma migrate deploy` against the **direct** (`:5432`) connection
-string — DDL does not flow through pgBouncer reliably.
+If you already have `prisma/migrations/` files, use
+`npx prisma migrate deploy` instead — it also reads `DIRECT_URL` for DDL.
 
-Verify the tables exist in Supabase → **Table editor**.
+Verify the tables exist in Supabase → **Table editor**. You should see
+`User`, `Account`, `Session`, `Favorite`, `Collection`, `SavedSearch`,
+`ImportedDataset`, `ImportedAsset`, `SearchHistory`, `ExportHistory`,
+`CachedSearch`, `CachedAsset`, `CachedContributor`, `Device`,
+`VerificationToken`, `PasswordResetToken`.
 
 ## 9. Post-deploy QA checklist
 
@@ -310,8 +325,16 @@ phase (Phase 1 = auth/search, Phase 2 = providers/CI, Phase 3 = import/export).
 
 **`prisma.importedDataset is undefined` / missing tables at runtime**
 - `npx prisma db push` (or `prisma migrate deploy`) was never run against
-  the pooled URL after switching providers. Re-run it from your laptop
-  with the `DATABASE_URL` env var set. See [§8](#8-first-deploy-database-setup).
+  the direct URL after provisioning Supabase. Re-run it from your laptop
+  with both `DATABASE_URL` and `DIRECT_URL` env vars set. See [§8](#8-first-deploy-database-setup).
+
+**`Error: Environment variable not found: DIRECT_URL`**
+- Your `.env` / Vercel env is missing `DIRECT_URL`. The app does not need
+  it at request time, but `prisma db push` / `prisma migrate deploy` / the
+  Prisma client initialization read the `datasource { directUrl = ... }`
+  block at schema-parse time. In production, set `DIRECT_URL` to the
+  Supabase direct connection string (port `5432`). In local dev, it can
+  be identical to `DATABASE_URL`.
 
 **Imported CSV shows zero rows on `/search`**
 - Confirm the dataset is `archived: false` (visible on `/import`).

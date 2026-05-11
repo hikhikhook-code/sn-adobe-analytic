@@ -1,15 +1,35 @@
-// SN Adobe Analytic — Prisma schema (SQLite for local dev / MVP)
-// String[] arrays from PRD are stored as JSON-encoded strings here for SQLite
-// compatibility. When migrating to Postgres (Supabase) for production, swap the
-// `provider` to "postgresql" and convert the *Json fields back to String[].
+// SN Adobe Analytic — Prisma schema (Postgres / Supabase).
+//
+// PR #27: switched provider from `sqlite` to `postgresql` so the app can
+// run on Supabase in production. The model shape is intentionally
+// unchanged — every `*Json` column that previously worked around
+// SQLite's lack of array support still stores JSON-encoded strings
+// here. We keep them as `String` on purpose:
+//
+//   - Zero runtime code changes. Every call site that reads/writes
+//     these columns (`src/lib/utils.ts:parseJsonArray`,
+//     `src/lib/providers/manual-import.ts`,
+//     `src/app/api/favorites/route.ts`, …) continues to work
+//     unmodified, which keeps the blast radius of this migration
+//     to "prisma provider swap + docs".
+//   - Forward-compatible. A later PR can convert individual columns
+//     to native `String[]` / `Json` one at a time; the JSON-string
+//     encoding is already valid JSON so backfill is trivial.
+//
+// `directUrl` is used by `prisma migrate` / `prisma db push` (DDL).
+// `url` is used by the app at request time. On Supabase:
+//   - `url`        -> pooled connection (port 6543, pgBouncer)
+//   - `directUrl`  -> direct connection (port 5432)
+// See docs/DEPLOYMENT.md for the exact format.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
@@ -20,11 +40,15 @@ model User {
   hashedPassword    String?
   image             String?
   plan              String    @default("FREE") // FREE | STARTER | PRO | ANNUAL
-  // Access-control role. Stored as a string because SQLite's Prisma
-  // provider doesn't support enums cleanly (same reason `plan` is a
-  // string). Valid values: "USER" | "OWNER" | "ADMIN". Anything else
-  // is treated as "USER" by `normalizeRole()` — so a typo / stale value
-  // never silently grants elevated access.
+  // Access-control role. Kept as a string (not a Prisma enum) for
+  // historical + forward-compat reasons: (a) the original SQLite
+  // schema couldn't use enums cleanly, so every call site already
+  // handles string input, and (b) PR #27 deliberately kept the
+  // column shape unchanged when switching providers to Postgres so
+  // the migration could be a pure provider swap. `normalizeRole()`
+  // maps any unknown value back to "USER" so a typo or stale value
+  // never silently grants elevated access. Valid values:
+  // "USER" | "OWNER" | "ADMIN".
   //
   // IMPORTANT: this field is written ONLY by server-side code (the
   // owner-bootstrap helper during sign-in, or an ops user editing the
@@ -196,11 +220,10 @@ model Favorite {
   savedAt          DateTime @default(now())
   // Free-text user notes. Optional; capped at ~2KB by the API layer.
   notes            String?
-  // Collection/folder assignment. Nullable (= "Uncategorized"). Not a
-  // cascading FK at the DB level because SQLite's onDelete defaults
-  // already do what we want here: if a Collection is deleted we want the
-  // favorites to fall back to Uncategorized, not to be deleted. Enforced
-  // via `SetNull` below.
+  // Collection/folder assignment. Nullable (= "Uncategorized"). Kept as
+  // a non-cascading relation on purpose: if a Collection is deleted we
+  // want favorites to fall back to Uncategorized, not to be deleted.
+  // Enforced via `SetNull` below.
   collectionId     String?
   collection       Collection? @relation(fields: [collectionId], references: [id], onDelete: SetNull)
   // Track-changes telemetry. The UI uses these to render the delta card.
@@ -213,8 +236,9 @@ model Favorite {
   lastCheckedDownloads      Int?
   lastCheckedPerformanceScore Int?
   // Data-quality tier of the most recent refresh (demo | estimated |
-  // public_metadata | verified). Stored as a string because Prisma
-  // doesn't support enums on SQLite cleanly.
+  // public_metadata | verified). Stored as a string for
+  // forward-compatibility with the rest of the schema (see
+  // User.role on why we don't use Prisma enums here).
   lastCheckedDataQuality    String?
   lastCheckedProviderId     String?
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)

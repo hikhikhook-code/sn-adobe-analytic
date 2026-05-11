@@ -6,6 +6,25 @@ on:
   pull_request:
     branches: ["**"]
 
+# CI env vars (PR #27):
+#
+#   DATABASE_URL / DIRECT_URL  — Postgres-shaped placeholder only. `prisma
+#     generate` and `next build` validate the URL format but do NOT open a
+#     connection to the database in this workflow, so pointing them at
+#     `postgres://.../ci` is sufficient. No real Supabase credentials are
+#     required; we deliberately do not spin up a Postgres service container
+#     because nothing in the build path actually executes SQL.
+#
+#   NEXTAUTH_SECRET  — Carries the literal `-not-used-at-runtime` suffix so
+#     `src/lib/env.ts`'s production-runtime guard refuses to serve traffic
+#     if the CI value ever leaks to a real deploy (belt-and-braces guard
+#     on top of Vercel env isolation).
+
+env:
+  # Postgres-shaped placeholder. Prisma only validates format at generate
+  # time; no real DB is touched during CI.
+  CI_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/sn_adobe_analytic_ci?schema=public"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,7 +48,8 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
         env:
-          DATABASE_URL: "file:./dev.db"
+          DATABASE_URL: ${{ env.CI_DATABASE_URL }}
+          DIRECT_URL: ${{ env.CI_DATABASE_URL }}
 
       - name: Lint
         run: npm run lint
@@ -40,7 +60,8 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          DATABASE_URL: "file:./dev.db"
+          DATABASE_URL: ${{ env.CI_DATABASE_URL }}
+          DIRECT_URL: ${{ env.CI_DATABASE_URL }}
           NEXTAUTH_SECRET: "ci-build-secret-not-used-at-runtime"
           NEXTAUTH_URL: "http://localhost:3000"
           DATA_PROVIDER: "mock"
