@@ -72,7 +72,16 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        # We deliberately use `npm install` (not `npm ci`) here so the
+        # workflow survives when `package-lock.json` is slightly out of
+        # sync with `package.json`. `npm ci` refuses to run in that case
+        # (it's strict by design, which is correct for the main CI build)
+        # and would block the operator from applying the schema for
+        # reasons totally unrelated to the DB. For this one-shot,
+        # operator-triggered workflow we only need a working node_modules
+        # for `prisma generate` + `prisma db push`, not a reproducible
+        # build. `npm install` is the right trade-off.
+        run: npm install --no-audit --no-fund
         env:
           # Skip postinstall's prisma generate; the next step does it.
           PRISMA_SKIP_POSTINSTALL_GENERATE: "true"
