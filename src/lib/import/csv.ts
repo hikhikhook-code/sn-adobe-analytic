@@ -57,6 +57,23 @@ const FIELD_ALIASES: Record<ImportField, string[]> = {
     "creatorid",
     "userid",
   ],
+  contributorUrl: [
+    "contributorurl",
+    "contributorprofileurl",
+    "contributorpage",
+    "contributorlink",
+    "authorurl",
+    "authorprofile",
+    "authorpage",
+    "creatorurl",
+    "creatorprofile",
+    "profileurl",
+    "profilepage",
+    "profilelink",
+    "artistpage",
+    "artisturl",
+    "artistprofile",
+  ],
   keywords: ["keywords", "tags", "tag"],
   adobeStockUrl: ["adobestockurl", "url", "link", "permalink"],
   thumbnailUrl: ["thumbnailurl", "thumb", "image", "preview", "thumbnail"],
@@ -133,6 +150,9 @@ export interface NormalizedRow {
   uploadDate: Date | null;
   contributorName: string | null;
   contributorId: string | null;
+  /** Optional Adobe Stock contributor profile URL (PR #29). Stored
+   *  as-entered; normalized at render time by `resolveContributorLink`. */
+  contributorUrl: string | null;
   isPremium: boolean;
   isAiGenerated: boolean;
   keywordsJson: string;
@@ -284,6 +304,11 @@ export function normalizeRows(
       uploadDate: uploadDate.value,
       contributorName: get("contributorName") || null,
       contributorId: get("contributorId") || null,
+      // PR #29: optional CSV column. When the user provides a
+      // contributor profile URL we pass it through verbatim; the
+      // link resolver in `adobe-stock-link.ts` normalizes + validates
+      // at render time (and rejects any non-stock.adobe.com origin).
+      contributorUrl: get("contributorUrl") || null,
       isPremium: headerByField.has("isPremium")
         ? parseBool(get("isPremium"))
         : false,

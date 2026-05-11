@@ -34,6 +34,26 @@ import type { DataQuality, SearchAsset } from "@/types/search";
  *      search page actually gets a real keyword. Also caps the query
  *      at 120 chars so a pathological title can't produce a 4KB URL.
  *
+ * PR #29 (contributor link UX fix): the "always fall back to a
+ * creator_name search" policy above turned out to produce a bad
+ * user experience in practice. Adobe's public keyword search almost
+ * never returns the contributor's own page for a contributor-name
+ * query, so the click always led to a grid of unrelated assets. The
+ * resolver now opens a REAL contributor page when we can trust one,
+ * and shows the name as plain text otherwise:
+ *
+ *   - Trusted caller (`providerId ∈ {manual, official}` with
+ *     `dataQuality ∈ {verified, public_metadata}`) AND the asset
+ *     carries a non-empty `contributorUrl` that points at
+ *     `stock.adobe.com` → use that URL directly (normalized to
+ *     `/uk/` if it came from `/id/`).
+ *   - Trusted caller AND a non-empty, URL-safe `contributorId` →
+ *     synthesize `/uk/contributor/<id>`.
+ *   - Otherwise → `kind: "none"`. UI renders the contributor name
+ *     as plain text with "Contributor page unavailable for this
+ *     result." as the tooltip. **The resolver never falls back to
+ *     an Adobe keyword search on the contributor name.**
+ *
  * Three hard rules remain:
  *
  *   1. Never emit a raw `stock.adobe.com/<id>` unless the data came
@@ -47,6 +67,10 @@ import type { DataQuality, SearchAsset } from "@/types/search";
  *      browse related assets. If we don't even have a title, emit a
  *      "no real URL available" sentinel so the UI can disable the
  *      button with clear copy instead of pretending a link exists.
+ *      **The asset-link fallback is distinct from the contributor
+ *      link: contributor links never fall back to a search, because
+ *      a creator-name search rarely surfaces the contributor's own
+ *      page.**
  *   3. All app-generated Adobe Stock URLs use the UK locale
  *      (`/uk/...`). `/id/...` is the Indonesian locale and looks
  *      misleadingly like an "asset id" path to callers who don't know
@@ -202,11 +226,15 @@ export function adobeStockSearchUrl(keyword: string): string {
 }
 
 /**
- * Build a contributor-search URL on Adobe Stock. Uses the `k=` facet
- * (matching the PR brief's fallback shape) rather than the
- * `creator_name=` facet so there's exactly one code path for "we
- * couldn't verify a real Adobe page — land them on a UK search". UK
- * locale.
+ * Build a contributor-search URL on Adobe Stock.
+ *
+ * @deprecated PR #29 — no longer used by `resolveContributorLink`.
+ *   The resolver now refuses to search Adobe by creator name because
+ *   Adobe's keyword search rarely returns the contributor's page for
+ *   a name query, which produced a poor click-through experience. We
+ *   keep the helper exported for now so any out-of-tree callers
+ *   don't break on removal; future PRs can drop it entirely. Do not
+ *   introduce new callers.
  */
 export function adobeStockContributorSearchUrl(name: string): string {
   const n = sanitizeKeywordQuery(name);
@@ -214,7 +242,12 @@ export function adobeStockContributorSearchUrl(name: string): string {
   return `${ADOBE_STOCK_BASE_URL}/search?k=${encodeURIComponent(n)}`;
 }
 
-export type AdobeLinkKind = "asset" | "search" | "contributor-search" | "none";
+export type AdobeLinkKind =
+  | "asset"
+  | "search"
+  | "contributor"
+  | "contributor-search"
+  | "none";
 
 export interface ResolvedAdobeLink {
   /** URL the UI can put in an `href`, or `null` if no safe target exists. */
@@ -299,45 +332,104 @@ export function resolveAssetLink(
 /**
  * Decide the safest link for an asset's contributor name / avatar.
  *
- * We deliberately NEVER emit a direct `/uk/contributor/<id>` URL.
- * The mock generator's synthetic 9-digit contributorIds (e.g.
- * "211100456") look real but 404 on stock.adobe.com, and
- * user-imported CSVs only carry contributorId as a display-only
- * string with no guarantee it matches a real Adobe account. The
- * PR #19 brief explicitly says "Use …/uk/search?k=<keyword> fallback
- * or disable" — we fall back.
+ * As of PR #29 (see PR brief), the resolver NEVER falls back to an
+ * Adobe search-by-creator-name URL. The previous behavior — routing
+ * every click to `/uk/search?k=<name>` — was useless in practice
+ * because Adobe's keyword search rarely returns the contributor's
+ * own page for a contributor-name query, and it was also silently
+ * using mock contributor names as search terms, which produced
+ * nonsense pages.
  *
- *   - Contributor name present → UK keyword search on that name.
- *     Lets the user browse related work without landing on a fake
- *     profile page.
- *   - Otherwise → `kind: "none"` so the UI renders the placeholder
- *     label ("Unknown contributor") as plain text with no link.
+ * Resolution order:
+ *
+ *   1. If we have a trusted caller (manual / official provider,
+ *      with data quality `verified` or `public_metadata`) AND the
+ *      asset carries a `contributorUrl` pointing at
+ *      `stock.adobe.com`, use that URL directly (normalized to `/uk/`
+ *      if it came from `/id/`). This is the highest-fidelity path —
+ *      it preserves whatever shape the source returned
+ *      (`/contributor/<id>`, `/artist/<id>`, …).
+ *
+ *   2. If instead we have a trusted caller and a non-empty
+ *      `contributorId` (opaque string, not a synthetic-looking
+ *      9-digit mock id), synthesize `/uk/contributor/<id>`. We trust
+ *      the caller not to pass a mock id — the `providerId` gate
+ *      upstream keeps mock rows out of this branch.
+ *
+ *   3. Otherwise, return `kind: "none"` with `href: null` and a
+ *      clear reason. The UI renders the contributor name as plain
+ *      text with "Contributor page unavailable for this result."
+ *      as the tooltip. **We never fall back to a keyword search on
+ *      the contributor name.**
+ *
+ * Safe-by-default: any ambiguity (demo row, missing providerId,
+ * empty URL, non-Adobe URL) falls into the `"none"` branch. The
+ * resolver can never accidentally produce a fake `/uk/contributor/`
+ * URL for a synthetic contributor id, and it never dumps the user
+ * onto a keyword-search page for a creator name that doesn't match
+ * anything on Adobe.
  */
 export function resolveContributorLink(
-  asset: Pick<SearchAsset, "contributorId" | "contributorName">,
+  asset: Pick<
+    SearchAsset,
+    "contributorId" | "contributorName" | "contributorUrl"
+  >,
+  ctx: AssetLinkContext = {},
 ): ResolvedAdobeLink {
-  // No `ctx` parameter — see the module-level policy: we never produce
-  // a direct contributor-page URL regardless of how the caller
-  // classifies the row, so data-quality / provider-id have nothing to
-  // gate. The `contributorId` field on `asset` is ignored for the
-  // same reason (it's kept in the Pick<> signature only so callers
-  // can pass the same asset object they pass to resolveAssetLink
-  // without extra field plucking).
   const name = (asset.contributorName ?? "").trim();
-  if (name) {
-    return {
-      href: adobeStockContributorSearchUrl(name),
-      kind: "contributor-search",
-      label: asset.contributorName,
-      reason:
-        "Contributor links open a UK keyword search on the contributor's name instead of a direct profile page, so demo / imported data never lands on a fake /contributor/<id> URL.",
-    };
+  const trusted =
+    isTrustedQuality(ctx.dataQuality) && isTrustedProviderId(ctx.providerId);
+
+  // 1. Trusted caller supplied a Adobe Stock contributor URL. Prefer
+  //    it over synthesizing one from `contributorId` — the source
+  //    knows the exact path shape.
+  if (trusted) {
+    const normalized = normalizeAdobeStockUrl(asset.contributorUrl);
+    if (normalized && /\/(contributor|artist)\//i.test(normalized)) {
+      return {
+        href: normalized,
+        kind: "contributor",
+        label: name || "View contributor",
+        reason:
+          "Direct link to the contributor's Adobe Stock page (UK locale).",
+      };
+    }
   }
 
+  // 2. Trusted caller supplied a non-empty contributor id. Synthesize
+  //    the standard `/uk/contributor/<id>` URL. We require a trusted
+  //    caller because the mock provider's synthetic 9-digit ids would
+  //    look real here but 404 on stock.adobe.com; the `isTrusted*`
+  //    gates above keep mock rows out of this branch.
+  if (trusted) {
+    const id = (asset.contributorId ?? "").trim();
+    // Allow any non-empty, URL-safe-ish token. We don't try to
+    // validate the id against Adobe's ID format because Adobe has
+    // historically issued ids in multiple shapes (numeric, slug,
+    // legacy). The trusted-provider gate is what actually protects
+    // against fake ids; the charset check below is just to keep a
+    // malformed id from producing a malformed URL.
+    if (id && /^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$/.test(id)) {
+      return {
+        href: `${ADOBE_STOCK_BASE_URL}/contributor/${id}`,
+        kind: "contributor",
+        label: name || "View contributor",
+        reason:
+          "Direct link to the contributor's Adobe Stock page (UK locale, built from contributorId).",
+      };
+    }
+  }
+
+  // 3. Anything else: no safe link. UI should render the contributor
+  //    name as plain text with this reason as the tooltip. We
+  //    deliberately DO NOT fall back to a creator-name keyword
+  //    search — Adobe's search almost always fails to return the
+  //    contributor's own page for that query, so the click is
+  //    wasted.
   return {
     href: null,
     kind: "none",
-    label: "Unknown contributor",
-    reason: "No contributor info available for this asset.",
+    label: name || "Unknown contributor",
+    reason: "Contributor page unavailable for this result.",
   };
 }

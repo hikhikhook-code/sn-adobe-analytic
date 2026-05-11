@@ -35,6 +35,17 @@ export interface SearchAsset {
   uploadDate: string;
   contributorName: string;
   contributorId: string;
+  /**
+   * Direct URL to the contributor's public Adobe Stock page, when the
+   * data source supplied one. Optional for back-compat with older
+   * providers (mock) and call sites that hydrate assets without this
+   * field. `resolveContributorLink` prefers this over synthesizing a
+   * URL from `contributorId` so we link through whatever shape the
+   * source actually returned (`/contributor/<id>` or `/artist/<id>`,
+   * with any locale). Non-`stock.adobe.com` origins are rejected at
+   * resolve time.
+   */
+  contributorUrl?: string;
   isPremium: boolean;
   isAiGenerated: boolean;
   keywords: string[];

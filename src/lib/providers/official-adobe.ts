@@ -134,6 +134,14 @@ interface PublicAsset {
   uploadDate?: string;
   contributorName?: string;
   contributorId?: string;
+  /**
+   * Adobe Stock contributor profile URL supplied by the HTTP
+   * boundary, when available. PR #29: the link resolver prefers this
+   * over synthesizing a URL from `contributorId` so adapter-specific
+   * path shapes (`/contributor/<id>`, `/artist/<id>`, other locales)
+   * round-trip unchanged.
+   */
+  contributorUrl?: string;
   isPremium?: boolean;
   isAiGenerated?: boolean;
   keywords?: string[];
@@ -201,6 +209,11 @@ function toSearchAsset(raw: PublicAsset): SearchAsset {
     uploadDate: raw.uploadDate ?? new Date(0).toISOString(),
     contributorName: raw.contributorName ?? "(unknown contributor)",
     contributorId: raw.contributorId ?? "",
+    // Normalize `/id/` → `/uk/` and drop any non-Adobe origin. When the
+    // boundary didn't supply a URL, leave the field undefined — the
+    // link resolver will fall through to `contributorId` (if any) or
+    // render the contributor name as plain text. See PR #29.
+    contributorUrl: normalizeAdobeStockUrl(raw.contributorUrl) ?? undefined,
     isPremium: Boolean(raw.isPremium),
     isAiGenerated: Boolean(raw.isAiGenerated),
     keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
@@ -231,10 +244,15 @@ function scrapedToSearchAsset(raw: ScrapedAsset): SearchAsset {
     // sentinel and `metricsAvailable: false` keeps the UI honest.
     uploadDate: raw.uploadDate ?? new Date(0).toISOString(),
     contributorName: raw.contributorName ?? "(unknown contributor)",
-    // contributorId intentionally blank — we refuse to link to
-    // /contributor/<id> (see adobe-stock-link.ts). The name drives
-    // the UI's keyword-search fallback link.
+    // contributorId intentionally blank on the scraper path — the
+    // search-grid HTML doesn't expose a machine-readable id, only the
+    // anchor URL. We pass the URL through `contributorUrl` below and
+    // let the link resolver use it directly (PR #29).
     contributorId: "",
+    // Normalize `/id/` → `/uk/` and reject non-Adobe origins. Present
+    // only when the scraper extracted a `/contributor/<id>` or
+    // `/artist/<id>` href from the tile; absent otherwise.
+    contributorUrl: normalizeAdobeStockUrl(raw.contributorUrl) ?? undefined,
     isPremium: Boolean(raw.isPremium),
     isAiGenerated: Boolean(raw.isAiGenerated),
     keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
@@ -816,6 +834,11 @@ export async function enrichSearchResultsFromCache(
         contentType: detail.contentType || asset.contentType,
         contributorName: detail.contributorName || asset.contributorName,
         contributorId: detail.contributorId || asset.contributorId,
+        // PR #29: prefer the detail-page contributor URL when the
+        // scraper extracted one (`/uk/contributor/<id>` shape). Fall
+        // back to whatever the search-grid tile supplied. The
+        // link resolver normalizes either to `/uk/` at render time.
+        contributorUrl: detail.contributorUrl ?? asset.contributorUrl,
         isPremium: detail.isPremium ?? asset.isPremium,
         isAiGenerated: detail.isAiGenerated ?? asset.isAiGenerated,
         thumbnailUrl: detail.thumbnailUrl || asset.thumbnailUrl,

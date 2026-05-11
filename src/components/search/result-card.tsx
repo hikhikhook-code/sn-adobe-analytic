@@ -83,11 +83,19 @@ export function ResultCard({
     dataQuality,
     providerId,
   });
-  // resolveContributorLink intentionally doesn't take a context bag:
-  // per src/lib/adobe-stock-link.ts we ALWAYS route contributor links
-  // through a UK keyword search, so the dataQuality / providerId bag
-  // that resolveAssetLink uses has nothing to decide on here.
-  const contributorLink = resolveContributorLink(asset);
+  // PR #29: contributor links are resolved with the same
+  // dataQuality + providerId context as the asset link. Trusted
+  // callers (manual / official with verified or public_metadata
+  // data) can open a real `/uk/contributor/<id>` page when the asset
+  // carries a `contributorUrl` or a non-empty `contributorId`;
+  // untrusted callers (mock / missing providerId) fall into the
+  // "none" branch and render plain text. The resolver never falls
+  // back to an Adobe keyword search on the contributor name — that
+  // click was almost always a dead-end.
+  const contributorLink = resolveContributorLink(asset, {
+    dataQuality,
+    providerId,
+  });
 
   const keywordsShown = showAllKeywords ? asset.keywords : asset.keywords.slice(0, 6);
 
