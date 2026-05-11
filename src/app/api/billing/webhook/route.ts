@@ -57,7 +57,7 @@ export async function POST(req: Request) {
   try {
     const Stripe = (await import("stripe")).default;
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-      apiVersion: "2024-04-10" as string as "2025-04-30.basil",
+      apiVersion: "2024-04-10" as unknown as "2025-04-30.basil",
     });
     event = stripe.webhooks.constructEvent(
       rawBody,
