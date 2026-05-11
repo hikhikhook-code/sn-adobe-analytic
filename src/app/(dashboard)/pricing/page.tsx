@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Check, X, ShieldCheck, Sparkles } from "lucide-react";
+import { Check, X, ShieldCheck } from "lucide-react";
 import { TopBar } from "@/components/layout/topbar";
 import { PageHeader } from "@/components/layout/page-header";
 import {
@@ -18,42 +18,59 @@ import { cn } from "@/lib/utils";
 import type { Entitlements } from "@/lib/entitlements";
 
 /**
- * /pricing — PRD §7 plan comparison page.
+ * /pricing — Plan comparison + checkout page (PR #26).
  *
- * Foundation only (PR #17): no real checkout is wired. Each card's CTA
- * button is disabled with a "Coming soon" tooltip; the current plan is
- * highlighted based on `/api/user/entitlements`.
- *
- * Owner accounts (via `OWNER_EMAILS`) see a green banner at the top
- * confirming their bypass status — useful sanity check that the
- * whitelist is being read correctly.
+ * Supports USD and IDR display currencies. IDR prices are converted
+ * from USD using NEXT_PUBLIC_USD_TO_IDR_RATE for display only. Actual
+ * checkout uses Stripe Price IDs configured per currency.
  */
 
 type PlanKey = "FREE" | "STARTER" | "PRO" | "ANNUAL";
+type Currency = "USD" | "IDR";
+
+/** USD prices in cents — source of truth matching src/lib/pricing.ts */
+const PLAN_PRICES_USD_CENTS: Record<PlanKey, number> = {
+  FREE: 0,
+  STARTER: 900,
+  PRO: 2900,
+  ANNUAL: 1900,
+};
+
+function getUsdToIdrRate(): number {
+  const envRate = process.env.NEXT_PUBLIC_USD_TO_IDR_RATE;
+  if (envRate) {
+    const parsed = Number(envRate);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 16_000; // Safe default for local/demo display only
+}
+
+function formatPrice(cents: number, currency: Currency): string {
+  if (currency === "USD") {
+    const dollars = cents / 100;
+    return dollars % 1 === 0 ? `$${dollars}` : `$${dollars.toFixed(2)}`;
+  }
+  const rate = getUsdToIdrRate();
+  const idr = Math.round((cents / 100) * rate / 1000) * 1000;
+  return `Rp${idr.toLocaleString("id-ID")}`;
+}
 
 interface PlanCard {
   key: PlanKey;
   name: string;
-  priceLabel: string;
-  priceSub: string;
+  billingPeriod: string;
   tagline: string;
   highlight?: boolean;
-  features: Array<{ label: string; included: boolean | string }>;
+  features: Array<{ label: string; included: boolean }>;
   deviceLimit: string;
   searchesPerDay: string;
 }
 
-/**
- * Plan matrix — mirrors PRD §7. Kept in sync with
- * `src/lib/entitlements.ts` by convention; the server enforces the
- * *actual* gates, the table below is for display only.
- */
 const PLANS: PlanCard[] = [
   {
     key: "FREE",
     name: "Free",
-    priceLabel: "$0",
-    priceSub: "forever",
+    billingPeriod: "forever",
     tagline: "Try the app with demo data and 2 searches per day.",
     searchesPerDay: "2",
     deviceLimit: "1",
@@ -71,8 +88,7 @@ const PLANS: PlanCard[] = [
   {
     key: "STARTER",
     name: "Starter",
-    priceLabel: "$9",
-    priceSub: "/month",
+    billingPeriod: "/ month",
     tagline: "For contributors who search and export regularly.",
     searchesPerDay: "50",
     deviceLimit: "1",
@@ -90,8 +106,7 @@ const PLANS: PlanCard[] = [
   {
     key: "PRO",
     name: "Pro",
-    priceLabel: "$29",
-    priceSub: "/month",
+    billingPeriod: "/ month",
     tagline: "Unlock full analytics for serious contributors.",
     highlight: true,
     searchesPerDay: "Unlimited",
@@ -110,8 +125,7 @@ const PLANS: PlanCard[] = [
   {
     key: "ANNUAL",
     name: "Annual",
-    priceLabel: "$290",
-    priceSub: "/year",
+    billingPeriod: "/ month (billed annually)",
     tagline: "All Pro features, two months free, 5 device slots.",
     searchesPerDay: "Unlimited",
     deviceLimit: "5",
@@ -134,8 +148,22 @@ interface EntitlementsResponse {
   entitlements: Entitlements;
 }
 
+function detectDefaultCurrency(): Currency {
+  if (typeof navigator === "undefined") return "USD";
+  const lang = navigator.language || "";
+  if (lang.startsWith("id") || lang.includes("-ID")) return "IDR";
+  return "USD";
+}
+
 export default function PricingPage() {
   const [ent, setEnt] = useState<EntitlementsResponse | null>(null);
+  const [currency, setCurrency] = useState<Currency>("USD");
+  const [checkoutLoading, setCheckoutLoading] = useState<PlanKey | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCurrency(detectDefaultCurrency());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -145,9 +173,7 @@ export default function PricingPage() {
         const j: EntitlementsResponse = await res.json();
         if (!cancelled) setEnt(j);
       })
-      .catch(() => {
-        // Anonymous callers just see the guest view — no error to show.
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -155,6 +181,29 @@ export default function PricingPage() {
 
   const currentPlan = ent?.entitlements.plan ?? null;
   const isOwner = ent?.entitlements.isOwner ?? false;
+  const signedIn = ent?.signedIn ?? false;
+
+  const handleCheckout = async (planKey: PlanKey) => {
+    setCheckoutLoading(planKey);
+    setCheckoutError(null);
+    try {
+      const res = await fetch("/api/billing/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId: planKey, currency }),
+      });
+      const data = await res.json();
+      if (res.ok && data.url) {
+        window.location.href = data.url;
+        return;
+      }
+      setCheckoutError(data.message || "Checkout failed.");
+    } catch {
+      setCheckoutError("Network error. Please try again.");
+    } finally {
+      setCheckoutLoading(null);
+    }
+  };
 
   return (
     <>
@@ -175,110 +224,194 @@ export default function PricingPage() {
               <p className="font-semibold">Owner access active</p>
               <p className="text-xs text-emerald-800">
                 Plan limits are bypassed for your account. Every feature
-                gate is open regardless of your stored plan value. This
-                whitelist is configured server-side via{" "}
-                <code className="font-mono">OWNER_EMAILS</code>.
+                gate is open regardless of your stored plan value.
               </p>
             </div>
           </div>
         )}
 
-        <div
-          role="status"
-          className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
-        >
-          <Sparkles className="mt-0.5 h-4 w-4 flex-none" />
-          <div>
-            <p className="font-semibold">Payments — coming soon</p>
-            <p className="text-xs text-amber-800">
-              This PR ships the plan-gating foundation (owner whitelist,
-              entitlement helper, per-route gates, daily-search budget).
-              Stripe / PayPal checkout is deliberately deferred to a
-              later release. Contact the operator to upgrade for now.
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {PLANS.map((plan) => (
-            <Card
-              key={plan.key}
+        {/* Currency selector */}
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-muted-foreground">Display currency:</span>
+          <div className="inline-flex rounded-md border">
+            <button
+              type="button"
+              onClick={() => setCurrency("USD")}
               className={cn(
-                "flex flex-col overflow-hidden",
-                plan.highlight &&
-                  "border-accent-blue shadow-md ring-2 ring-accent-blue/30",
+                "px-3 py-1.5 text-xs font-medium rounded-l-md transition-colors",
+                currency === "USD"
+                  ? "bg-slate-900 text-white"
+                  : "bg-white text-slate-700 hover:bg-slate-50",
               )}
             >
-              <CardHeader className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-xl">{plan.name}</CardTitle>
-                  {currentPlan === plan.key && !isOwner && (
-                    <Badge variant="secondary">Current plan</Badge>
-                  )}
-                  {plan.highlight && (
-                    <Badge variant="accent">Most popular</Badge>
-                  )}
-                </div>
-                <div>
-                  <span className="text-3xl font-bold">{plan.priceLabel}</span>
-                  <span className="ml-1 text-xs text-muted-foreground">
-                    {plan.priceSub}
-                  </span>
-                </div>
-                <CardDescription>{plan.tagline}</CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-1 flex-col gap-4">
-                <ul className="space-y-1.5 text-sm">
-                  {plan.features.map((feat) => (
-                    <li
-                      key={feat.label}
-                      className="flex items-start gap-2"
-                    >
-                      {feat.included === true ? (
-                        <Check className="mt-0.5 h-4 w-4 flex-none text-emerald-600" />
-                      ) : feat.included === false ? (
-                        <X className="mt-0.5 h-4 w-4 flex-none text-muted-foreground/70" />
-                      ) : (
-                        <Check className="mt-0.5 h-4 w-4 flex-none text-emerald-600" />
-                      )}
-                      <span
-                        className={cn(
-                          feat.included === false &&
-                            "text-muted-foreground line-through",
-                        )}
-                      >
-                        {feat.label}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs">
-                  <p>
-                    <span className="font-medium">
-                      Searches / day:
-                    </span>{" "}
-                    {plan.searchesPerDay}
-                  </p>
-                  <p>
-                    <span className="font-medium">Devices:</span>{" "}
-                    {plan.deviceLimit}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant={plan.highlight ? "accent" : "outline"}
-                  className="w-full"
-                  disabled
-                  title="Payments are not yet enabled in this deployment."
-                >
-                  {currentPlan === plan.key && !isOwner
-                    ? "Your current plan"
-                    : "Coming soon"}
-                </Button>
-              </CardContent>
-            </Card>
-          ))}
+              USD
+            </button>
+            <button
+              type="button"
+              onClick={() => setCurrency("IDR")}
+              className={cn(
+                "px-3 py-1.5 text-xs font-medium rounded-r-md border-l transition-colors",
+                currency === "IDR"
+                  ? "bg-slate-900 text-white"
+                  : "bg-white text-slate-700 hover:bg-slate-50",
+              )}
+            >
+              IDR
+            </button>
+          </div>
+          {currency === "IDR" && (
+            <span className="text-[11px] text-muted-foreground">
+              Converted from USD at ~{getUsdToIdrRate().toLocaleString()} rate (display only)
+            </span>
+          )}
         </div>
+
+        {checkoutError && (
+          <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-800">
+            {checkoutError}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {PLANS.map((plan) => {
+            const priceCents = PLAN_PRICES_USD_CENTS[plan.key];
+            const priceDisplay = priceCents > 0
+              ? formatPrice(priceCents, currency)
+              : "$0";
+            const isCurrentPlan = currentPlan === plan.key && !isOwner;
+            const isPurchasable = plan.key !== "FREE" && !isCurrentPlan && !isOwner;
+
+            return (
+              <Card
+                key={plan.key}
+                className={cn(
+                  "flex flex-col overflow-hidden",
+                  plan.highlight &&
+                    "border-accent-blue shadow-md ring-2 ring-accent-blue/30",
+                )}
+              >
+                <CardHeader className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-xl">{plan.name}</CardTitle>
+                    {isCurrentPlan && (
+                      <Badge variant="secondary">Current plan</Badge>
+                    )}
+                    {plan.highlight && (
+                      <Badge variant="accent">Most popular</Badge>
+                    )}
+                  </div>
+                  <div>
+                    <span className="text-3xl font-bold">{priceDisplay}</span>
+                    {priceCents > 0 && (
+                      <span className="ml-1 text-xs text-muted-foreground">
+                        {plan.billingPeriod}
+                      </span>
+                    )}
+                    {priceCents === 0 && (
+                      <span className="ml-1 text-xs text-muted-foreground">
+                        forever
+                      </span>
+                    )}
+                  </div>
+                  <CardDescription>{plan.tagline}</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-1 flex-col gap-4">
+                  <ul className="space-y-1.5 text-sm">
+                    {plan.features.map((feat) => (
+                      <li
+                        key={feat.label}
+                        className="flex items-start gap-2"
+                      >
+                        {feat.included ? (
+                          <Check className="mt-0.5 h-4 w-4 flex-none text-emerald-600" />
+                        ) : (
+                          <X className="mt-0.5 h-4 w-4 flex-none text-muted-foreground/70" />
+                        )}
+                        <span
+                          className={cn(
+                            !feat.included && "text-muted-foreground line-through",
+                          )}
+                        >
+                          {feat.label}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs">
+                    <p>
+                      <span className="font-medium">Searches / day:</span>{" "}
+                      {plan.searchesPerDay}
+                    </p>
+                    <p>
+                      <span className="font-medium">Devices:</span>{" "}
+                      {plan.deviceLimit}
+                    </p>
+                  </div>
+                  {isPurchasable && signedIn ? (
+                    <Button
+                      type="button"
+                      variant={plan.highlight ? "accent" : "outline"}
+                      className="w-full"
+                      disabled={checkoutLoading === plan.key}
+                      onClick={() => handleCheckout(plan.key)}
+                    >
+                      {checkoutLoading === plan.key
+                        ? "Redirecting…"
+                        : `Upgrade to ${plan.name}`}
+                    </Button>
+                  ) : isPurchasable && !signedIn ? (
+                    <Button asChild variant="outline" className="w-full">
+                      <Link href="/auth/login?callbackUrl=%2Fpricing">
+                        Sign in to upgrade
+                      </Link>
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full"
+                      disabled
+                    >
+                      {isCurrentPlan
+                        ? "Your current plan"
+                        : isOwner
+                          ? "Owner bypass active"
+                          : "Free forever"}
+                    </Button>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+
+        {currency === "IDR" && (
+          <p className="text-xs text-muted-foreground text-center">
+            IDR price is converted from USD for display purposes only.
+            Final checkout price depends on the configured Stripe price for IDR.
+          </p>
+        )}
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Payment methods</CardTitle>
+            <CardDescription>
+              Payments are processed securely via Stripe. PayPal checkout
+              is coming soon.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground space-y-2">
+            <p>
+              After clicking &quot;Upgrade&quot;, you&apos;ll be redirected to
+              Stripe&apos;s secure checkout page. Your plan activates
+              automatically once payment is confirmed via webhook.
+            </p>
+            <p>
+              <strong>PayPal:</strong> Coming soon. We&apos;re working on
+              adding PayPal as an alternative payment method.
+            </p>
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>
@@ -292,8 +425,14 @@ export default function PricingPage() {
           <CardContent className="text-sm text-muted-foreground">
             <p>
               Your counter resets at 00:00 UTC daily. Current usage is
-              shown on the <Link href="/settings" className="text-accent-blue hover:underline">Settings page</Link> and on the Plan Usage card of the{" "}
-              <Link href="/dashboard" className="text-accent-blue hover:underline">Dashboard</Link>.
+              shown on the{" "}
+              <Link href="/settings" className="text-accent-blue hover:underline">
+                Settings page
+              </Link>{" "}
+              and on the Plan Usage card of the{" "}
+              <Link href="/dashboard" className="text-accent-blue hover:underline">
+                Dashboard
+              </Link>.
             </p>
           </CardContent>
         </Card>
