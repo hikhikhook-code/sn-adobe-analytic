@@ -1,0 +1,94 @@
+name: Prisma DB Push (one-shot)
+
+# Manual-trigger workflow to apply the Prisma schema to the configured
+# Postgres database. Useful for first-deploy bootstrap on Supabase when
+# the operator can't (or doesn't want to) run `npx prisma db push` from
+# their laptop — e.g. mobile-only operators.
+#
+# Why this exists:
+#   - First-time Supabase deploys need DDL to be applied against the
+#     DIRECT_URL (port 5432). Vercel's build phase deliberately doesn't
+#     do this (the build should succeed even against an empty DB). The
+#     operator has to run it themselves once.
+#   - `docs/DEPLOYMENT.md §8` describes the CLI path; this workflow is
+#     the point-and-click equivalent for operators without a local dev
+#     environment.
+#
+# Safety notes:
+#   - Manually triggered only (`workflow_dispatch`). Never runs on push.
+#   - Reads DATABASE_URL + DIRECT_URL from GitHub repo secrets — the
+#     values are never logged. Supabase credentials stay inside GitHub
+#     Secrets, same as any CI workflow.
+#   - Uses `prisma db push` (not `migrate deploy`) because this repo
+#     doesn't ship migrations yet; db push is idempotent and safe to
+#     re-run. Adds `--accept-data-loss` is explicitly NOT set — the
+#     run will fail instead of dropping existing data.
+#
+# How to run (from the browser, no CLI needed):
+#   1. Repo Settings → Secrets and variables → Actions → New repo secret
+#      Name: DATABASE_URL
+#      Value: <Supabase pooled URL, exactly as in Vercel>
+#      Repeat for DIRECT_URL (Supabase direct URL, port 5432).
+#   2. Actions tab → "Prisma DB Push (one-shot)" in the left sidebar →
+#      "Run workflow" button → confirm.
+#   3. Wait ~1 minute; the run should finish green.
+#   4. Verify in Supabase → Table editor that User, Account, Session,
+#      etc. now exist.
+#   5. Retry /auth/register in your deployed app.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Environment vars are populated from repo Secrets. Never echoed.
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
+
+    steps:
+      - name: Refuse to run without the required secrets
+        # Fail fast + explicitly if the operator forgot to add the
+        # secrets. This check only reads lengths, never the values.
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set. See the workflow file header for setup."
+            exit 1
+          fi
+          if [ -z "$DIRECT_URL" ]; then
+            echo "::error::DIRECT_URL secret is not set. See the workflow file header for setup."
+            exit 1
+          fi
+          echo "Secrets present (lengths: DATABASE_URL=${#DATABASE_URL}, DIRECT_URL=${#DIRECT_URL}). Values intentionally not logged."
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # Skip postinstall's prisma generate; the next step does it.
+          PRISMA_SKIP_POSTINSTALL_GENERATE: "true"
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Apply schema to the database
+        # db push is idempotent — safe to re-run. It uses DIRECT_URL
+        # (declared in prisma/schema.prisma's `directUrl`) for DDL,
+        # which is what Supabase's pgBouncer pooler can't serve.
+        run: npx prisma db push
+
+      - name: Done
+        run: |
+          echo "✅ Schema applied. Tables should now exist in your database."
+          echo "Next steps:"
+          echo "  - Open Supabase → Table editor and confirm User, Account, Session, etc. are present."
+          echo "  - Retry /auth/register in your deployed app."
