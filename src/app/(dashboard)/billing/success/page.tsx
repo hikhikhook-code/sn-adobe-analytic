@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { TopBar } from "@/components/layout/topbar";
 import {
@@ -22,7 +23,7 @@ import { Button } from "@/components/ui/button";
  * the payment was submitted and tells the user their plan will
  * update momentarily.
  */
-export default function BillingSuccessPage() {
+function BillingSuccessContent() {
   const params = useSearchParams();
   const sessionId = params.get("session_id");
 
@@ -66,5 +67,14 @@ export default function BillingSuccessPage() {
         </Card>
       </div>
     </>
+  );
+}
+
+
+export default function BillingSuccessPage() {
+  return (
+    <Suspense fallback={<><TopBar title="Billing" subtitle="Payment successful" /><div className="flex items-center justify-center p-6"><p className="text-muted-foreground">Loading...</p></div></>}>
+      <BillingSuccessContent />
+    </Suspense>
   );
 }
