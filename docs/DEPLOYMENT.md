@@ -483,6 +483,24 @@ phase (Phase 1 = auth/search, Phase 2 = providers/CI, Phase 3 = import/export).
 - pgBouncer transaction pooler doesn't tolerate prepared statements.
   You forgot `?pgbouncer=true` on the URL. Fix the env var and redeploy.
 
+**Register page shows "Could not create your account. Please try again in a moment."**
+- The register route now classifies server errors into distinct codes;
+  search Vercel function logs for `[register] create failed` to see the
+  underlying Prisma error. Common causes:
+  - `code=db_not_migrated` (Prisma `P2021` / `P2022`) — tables or
+    columns are missing. Run `npx prisma db push` against `DIRECT_URL`
+    one time. See [§8](#8-first-deploy-database-setup).
+  - `code=db_unreachable` (Prisma init error, or "prepared statement
+    already exists") — `DATABASE_URL` is wrong or missing
+    `?pgbouncer=true&connection_limit=1`. See [§4](#4-get-the-pooled--direct-connection-strings).
+  - `code=server_error` with a `prisma_PNNNN` hint — look up the
+    Prisma code; typical culprits are transient Supabase outages or
+    a paused free-tier project.
+- User-facing copy on the register page now maps each of those codes
+  to specific guidance ("contact operator — DB setup isn't finished" /
+  "service temporarily unavailable"), so a stuck deployment no longer
+  looks like a user-error.
+
 ## 11. Rolling back
 
 Vercel keeps every deployment as a named revision. To roll back:

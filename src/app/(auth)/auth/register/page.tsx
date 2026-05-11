@@ -85,6 +85,22 @@ function RegisterInner() {
             label: "Go to sign in",
           },
         });
+      } else if (data.code === "db_not_migrated") {
+        // 503 from the register route when the Supabase schema hasn't
+        // been applied yet. The API message is already user-facing;
+        // tell the user this is a server-side setup issue (not their
+        // fault) so they don't keep re-trying the same password.
+        setError({
+          message:
+            data.error ??
+            "The account system isn't ready on this deployment yet. Please contact the site operator — they need to finish the database setup.",
+        });
+      } else if (data.code === "db_unreachable") {
+        setError({
+          message:
+            data.error ??
+            "The account system is temporarily unavailable. Please try again in a few minutes.",
+        });
       } else if (res.status === 400) {
         setError({
           message:
@@ -92,6 +108,9 @@ function RegisterInner() {
             "Some details are invalid. Double-check your email and password.",
         });
       } else {
+        // Generic 500 fallback. We still surface the server-provided
+        // message when it's specific, and fall back to a friendly
+        // retry prompt otherwise.
         setError({
           message:
             data.error ??
