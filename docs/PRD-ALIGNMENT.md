@@ -1394,3 +1394,134 @@ exposed to normal users.
   so manual purging suffices for now.
 - The Settings → Data Sources card is visible only to signed-in users.
   Guests see the standard "not signed in" placeholder.
+
+
+
+---
+
+## 18. Payment Integration with USD + IDR Pricing (PR #26)
+
+PR #26 ships the Stripe checkout foundation with dual-currency display
+(USD base + IDR conversion) and a server-verified webhook for plan
+upgrades. PayPal is deferred to a follow-up PR (placeholder only).
+
+### Pricing architecture
+
+| Concern | Implementation |
+| --- | --- |
+| Source of truth for prices | `src/lib/pricing.ts` — USD cents per plan |
+| IDR display conversion | `getUsdToIdrRate()` reads `NEXT_PUBLIC_USD_TO_IDR_RATE` env (default 16000). Display only — not a live quote. |
+| Checkout currency resolution | Stripe Price IDs per plan × currency from env vars |
+| Plan upgrade trigger | Stripe webhook (`checkout.session.completed`) — never client-side |
+
+### Plans × pricing
+
+| Plan | USD / month | IDR / month (display, ~16000 rate) | Stripe env var (USD) | Stripe env var (IDR) |
+| --- | --- | --- | --- | --- |
+| Free | $0 | Rp0 | — | — |
+| Starter | $9 | ~Rp144.000 | `STRIPE_STARTER_PRICE_ID_USD` | `STRIPE_STARTER_PRICE_ID_IDR` |
+| Pro | $29 | ~Rp464.000 | `STRIPE_PRO_PRICE_ID_USD` | `STRIPE_PRO_PRICE_ID_IDR` |
+| Annual | $19/mo (billed yearly) | ~Rp304.000/mo | `STRIPE_ANNUAL_PRICE_ID_USD` | `STRIPE_ANNUAL_PRICE_ID_IDR` |
+
+### Currency selector (`/pricing`)
+
+- Two-button toggle: **USD** | **IDR**.
+- Default: IDR if browser locale is `id` or `*-ID`; otherwise USD.
+- IDR prices rounded to nearest Rp1.000.
+- Disclaimer shown when IDR is selected: "IDR price is converted from
+  USD for display. Final checkout price depends on configured Stripe
+  price."
+
+### Checkout flow
+
+1. User clicks "Upgrade to {Plan}" on `/pricing`.
+2. `POST /api/billing/checkout` with `{ planId, currency }`.
+3. Server resolves `getStripePriceId(planId, currency)` from env.
+4. If Price ID missing → 503 with `"{CURRENCY} checkout is not
+   configured yet for the {Plan} plan."` — no fake payment.
+5. If Stripe not configured (no `STRIPE_SECRET_KEY`) → 503.
+6. Creates `stripe.checkout.sessions.create({ mode: "subscription",
+   line_items: [{ price: priceId }], ... })`.
+7. Returns `{ url }` → client redirects to Stripe.
+8. Stripe success → `/billing/success?session_id=...`.
+9. Stripe cancel → `/billing/cancel`.
+
+**Plan is NOT updated on success-page load.** Only the webhook does it.
+
+### Webhook (`/api/billing/webhook`)
+
+| Event | Action |
+| --- | --- |
+| `checkout.session.completed` | Reads `metadata.userId` + `metadata.planId`, updates `User.plan` WHERE `role = "USER"` (never overwrites OWNER/ADMIN). |
+| `customer.subscription.updated` | Same logic — syncs plan if subscription is active. |
+| `customer.subscription.deleted` | Downgrades to FREE (respects OWNER/ADMIN gate). |
+
+Security:
+- Always verifies `stripe-signature` header against `STRIPE_WEBHOOK_SECRET`.
+- Invalid/missing signature → 400 immediately.
+- Returns 200 on all processed events (even unhandled types) to prevent
+  Stripe retries on events we don't care about.
+
+### Billing pages
+
+| Route | Purpose |
+| --- | --- |
+| `/billing/success` | Post-checkout confirmation. Shows "Payment successful, plan updates momentarily." Does NOT touch `User.plan`. |
+| `/billing/cancel` | User canceled checkout. Shows "No payment processed, try again from Pricing." |
+
+### Owner/admin access (unchanged)
+
+Owner and admin roles are NEVER modified by billing events. The webhook
+uses `WHERE role = "USER"` on every `updateMany` call so elevated accounts
+keep their access regardless of subscription status.
+
+### PayPal
+
+Placeholder only in this PR: "PayPal checkout coming soon" on the
+`/pricing` page. No PayPal routes, no SDK integration. Deferred to a
+follow-up PR to keep scope manageable.
+
+### Entitlements (unchanged)
+
+The existing `entitlementsFor()` helper in `src/lib/entitlements.ts`
+already reads `User.plan` and gates features accordingly. No changes
+needed — the webhook writes the plan value that entitlements already
+consume.
+
+### Env vars added
+
+| Variable | Purpose |
+| --- | --- |
+| `STRIPE_STARTER_PRICE_ID_USD` | Stripe Price ID for Starter plan (USD) |
+| `STRIPE_PRO_PRICE_ID_USD` | Stripe Price ID for Pro plan (USD) |
+| `STRIPE_ANNUAL_PRICE_ID_USD` | Stripe Price ID for Annual plan (USD) |
+| `STRIPE_STARTER_PRICE_ID_IDR` | Stripe Price ID for Starter plan (IDR) |
+| `STRIPE_PRO_PRICE_ID_IDR` | Stripe Price ID for Pro plan (IDR) |
+| `STRIPE_ANNUAL_PRICE_ID_IDR` | Stripe Price ID for Annual plan (IDR) |
+| `NEXT_PUBLIC_USD_TO_IDR_RATE` | Static exchange rate for display conversion (default: 16000) |
+
+### Hard constraints preserved
+
+- **No real secrets committed.** All Price IDs and keys are in env vars
+  with empty placeholders in `.env.example`.
+- **No fake payment success.** Missing Price IDs show a clean error, not
+  a simulated checkout.
+- **No client-only plan upgrade.** The success page is informational;
+  only the webhook mutates `User.plan`.
+- **No live exchange-rate API.** IDR display is a static multiplication.
+- **Owner whitelist unaffected.** `role = "USER"` guard on every DB write.
+
+### Known limitations
+
+- PayPal is placeholder only — no functional integration in this PR.
+- Subscription management (cancel, downgrade, billing portal) is not
+  wired in this PR. Users would need to cancel via Stripe's customer
+  portal or contact the operator.
+- No invoice emails or receipt pages — Stripe handles email receipts
+  natively if configured in the Stripe dashboard.
+- `USD_TO_IDR_RATE` must be manually updated by the operator; there is
+  no auto-refresh mechanism (deliberate — no live API dependency).
+- The webhook assumes `metadata.userId` and `metadata.planId` are set
+  on every checkout session. If a session is created outside this app
+  (e.g. directly in Stripe dashboard), the webhook logs a warning and
+  skips the plan update.
