@@ -50,7 +50,7 @@ export async function POST(req: Request) {
 
   // Send verification email
   try {
-    await sendVerificationEmail(user.email, user.name);
+    await sendVerificationEmail(user.email, user.name ?? undefined);
   } catch (error) {
     console.error("Failed to send verification email:", error);
     // Non-blocking: email send failure should not prevent registration
