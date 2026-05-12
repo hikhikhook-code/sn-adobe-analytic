@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { mockProvider } from "./mock";
 import { officialAdobeProvider } from "./official-adobe";
 import { manualImportProvider } from "./manual-import";
+import { liveScraperProvider } from "./live-scraper";
 import {
   ProviderFeatureUnsupportedError,
   ProviderNoDataError,
@@ -32,6 +33,7 @@ const PROVIDERS: Record<string, DataProvider> = {
   // around for back-compat with existing .env files and docs.
   public: officialAdobeProvider,
   manual: manualImportProvider,
+  "live-scraper": liveScraperProvider,
 };
 
 let warnedAboutLiveScraper = false;
@@ -273,7 +275,7 @@ export async function runDashboard(
   return runProvider(ctx, (p) => p.dashboard(ctx));
 }
 
-export { mockProvider, officialAdobeProvider, manualImportProvider };
+export { mockProvider, officialAdobeProvider, manualImportProvider, liveScraperProvider };
 export type {
   DashboardKeywordHighlight,
   DataProvider,
@@ -304,3 +306,7 @@ export type {
   TrendingSort,
 } from "./types";
 export { DATA_QUALITY_LABELS, DATA_QUALITY_DESCRIPTIONS } from "./types";
+
+
+
+
