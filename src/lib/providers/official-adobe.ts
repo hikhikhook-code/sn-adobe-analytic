@@ -1,101 +1,101 @@
 ﻿import {
   DataProvider,
-  SearchParams,
-  SearchResult,
   ProviderNotImplementedError,
   ProviderNoDataError,
-} from './index';
-import { scrapeAdobeStockSearch } from './adobe-stock-scraper';
+  ProviderSearchResult,
+  ProviderContributorResult,
+  ProviderHeatmapResult,
+  ProviderTrendingResult,
+  ProviderSimilarResult,
+  ProviderDashboardResult,
+} from "./types";
+import type { ProviderSearchRequest } from "./types";
+import { scrapeAdobeStockSearch } from "./adobe-stock-scraper";
 
 export const officialAdobeProvider: DataProvider = {
-  name: 'official',
-  displayName: 'Adobe Stock (Public Metadata)',
-  description: 'Real-time data from Adobe Stock public pages',
+  id: "official-adobe",
+  name: "official",
+  dataQuality: "public_metadata",
 
   capabilities: {
-    search: 'supported',
-    portfolio: 'partial',
-    heatmap: 'unsupported',
-    trending: 'unsupported',
-    similarImageSearch: 'unsupported',
-    dashboardAnalytics: 'partial',
+    search: "supported",
+    contributor: "unsupported",
+    heatmap: "unsupported",
+    trending: "unsupported",
+    similarImage: "unsupported",
+    dashboard: "unsupported",
+    downloadsAvailable: false,
   },
 
-  async search(params: SearchParams): Promise<SearchResult> {
+  async search(req: ProviderSearchRequest): Promise<ProviderSearchResult> {
     try {
       const result = await scrapeAdobeStockSearch(
-        params.keyword,
-        params.contentType,
-        params.sort,
-        params.page || 1,
+        req.keyword,
+        req.contentType,
+        req.sort,
+        req.page || 1,
       );
 
       return {
-        totalResults: result.totalResults,
         results: result.results.map((asset) => ({
           id: asset.id,
           title: asset.title,
           thumbnailUrl: asset.thumbnailUrl,
-          downloads: null, // Not available in public scrape
-          performanceScore: null,
-          downloadsPerMonth: null,
+          downloads: 0,
+          performanceScore: 0,
+          downloadsPerMonth: 0,
           contentType: asset.contentType,
           categories: asset.categories,
-          uploadDate: asset.uploadDate,
+          uploadDate: asset.uploadDate || new Date().toISOString(),
           contributorName: asset.contributorName,
           contributorId: asset.contributorId,
           isPremium: asset.isPremium,
           isAiGenerated: asset.isAiGenerated,
           keywords: asset.keywords,
           adobeStockUrl: asset.adobeStockUrl,
-          dataQuality: 'public_metadata',
-          metricsAvailable: false, // Downloads/performance not available
         })),
-        dataQuality: 'public_metadata',
-        metricsAvailable: false,
+        totalResults: result.totalResults,
+        dataQuality: "public_metadata",
+        competitionLevel: "medium",
+        aiSaturation: 0.5,
+        contentBreakdown: [],
+        providerName: "Adobe Stock (Public Metadata)",
       };
     } catch (error) {
-      console.error('[officialAdobeProvider] Search failed:', error);
+      console.error("[officialAdobeProvider] Search failed:", error);
       throw new ProviderNoDataError(
         `Failed to fetch from Adobe Stock: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   },
 
-  async portfolio(): Promise<SearchResult> {
-    // Portfolio requires authenticated access to contributor data
+  async contributor(): Promise<ProviderContributorResult> {
     throw new ProviderNotImplementedError(
-      'Portfolio search not supported for public metadata provider',
+      "Contributor search not yet implemented for official Adobe provider",
     );
   },
 
-  async heatmap(): Promise<SearchResult> {
+  async heatmap(): Promise<ProviderHeatmapResult> {
     throw new ProviderNotImplementedError(
-      'Heat map not supported for public metadata provider',
+      "Heat map not yet implemented for official Adobe provider",
     );
   },
 
-  async trending(): Promise<SearchResult> {
+  async trending(): Promise<ProviderTrendingResult> {
     throw new ProviderNotImplementedError(
-      'Trending not supported for public metadata provider',
+      "Trending not yet implemented for official Adobe provider",
     );
   },
 
-  async similarImageSearch(): Promise<SearchResult> {
+  async similar(): Promise<ProviderSimilarResult> {
     throw new ProviderNotImplementedError(
-      'Similar image search not supported for public metadata provider',
+      "Similar image search not yet implemented for official Adobe provider",
     );
   },
 
-  async dashboardAnalytics() {
-    return {
-      totalAssets: null,
-      totalDownloads: null,
-      averagePerformance: null,
-      topAssets: [],
-      dataQuality: 'public_metadata',
-      metricsAvailable: false,
-      notice: 'Download and performance metrics are not available from public metadata',
-    };
+  async dashboard(): Promise<ProviderDashboardResult> {
+    throw new ProviderNotImplementedError(
+      "Dashboard analytics not yet implemented for official Adobe provider",
+    );
   },
 };
