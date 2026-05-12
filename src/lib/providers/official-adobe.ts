@@ -11,6 +11,7 @@
 } from "./types";
 import type { ProviderSearchRequest } from "./types";
 import { scrapeAdobeStockSearch } from "./adobe-stock-scraper";
+import { estimatePerformanceMetrics } from "./performance-estimator";
 
 export const officialAdobeProvider: DataProvider = {
   id: "official-adobe",
@@ -37,29 +38,39 @@ export const officialAdobeProvider: DataProvider = {
       );
 
       return {
-        results: result.results.map((asset) => ({
-          id: asset.id,
-          title: asset.title,
-          thumbnailUrl: asset.thumbnailUrl,
-          downloads: 0,
-          performanceScore: 0,
-          downloadsPerMonth: 0,
-          contentType: asset.contentType,
-          categories: asset.categories,
-          uploadDate: asset.uploadDate || new Date().toISOString(),
-          contributorName: asset.contributorName,
-          contributorId: asset.contributorId,
-          isPremium: asset.isPremium,
-          isAiGenerated: asset.isAiGenerated,
-          keywords: asset.keywords,
-          adobeStockUrl: asset.adobeStockUrl,
-        })),
+        results: result.results.map((asset) => {
+          const metrics = estimatePerformanceMetrics(
+            asset.id,
+            asset.uploadDate,
+            asset.contentType,
+            asset.isPremium,
+            asset.isAiGenerated,
+          );
+
+          return {
+            id: asset.id,
+            title: asset.title,
+            thumbnailUrl: asset.thumbnailUrl,
+            downloads: metrics.downloads,
+            performanceScore: metrics.performanceScore,
+            downloadsPerMonth: metrics.downloadsPerMonth,
+            contentType: asset.contentType,
+            categories: asset.categories,
+            uploadDate: asset.uploadDate || new Date().toISOString(),
+            contributorName: asset.contributorName,
+            contributorId: asset.contributorId,
+            isPremium: asset.isPremium,
+            isAiGenerated: asset.isAiGenerated,
+            keywords: asset.keywords,
+            adobeStockUrl: asset.adobeStockUrl,
+          };
+        }),
         totalResults: result.totalResults,
-        dataQuality: "public_metadata",
+        dataQuality: "estimated",
         competitionLevel: "medium",
         aiSaturation: 0.5,
         contentBreakdown: [],
-        providerName: "Adobe Stock (Public Metadata)",
+        providerName: "Adobe Stock (Estimated Metrics)",
       };
     } catch (error) {
       console.error("[officialAdobeProvider] Search failed:", error);
