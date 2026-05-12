@@ -2,7 +2,7 @@
 
 import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -21,7 +21,6 @@ interface FormError {
 }
 
 function RegisterInner() {
-  const router = useRouter();
   const sp = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<FormError | null>(null);
@@ -61,7 +60,7 @@ function RegisterInner() {
     } catch {
       setError({
         message:
-          "Couldn''t reach the server. Check your connection and try again.",
+          "Couldn&apos;t reach the server. Check your connection and try again.",
       });
       setLoading(false);
       return;
@@ -109,7 +108,7 @@ function RegisterInner() {
         <CardHeader className="space-y-1 text-center">
           <CardTitle className="text-2xl">Check your email</CardTitle>
           <CardDescription>
-            We''ve sent a verification link to your inbox
+            We&apos;ve sent a verification link to your inbox
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -124,7 +123,7 @@ function RegisterInner() {
           </div>
 
           <div className="space-y-2 rounded-md bg-blue-50 px-4 py-3">
-            <p className="text-sm font-medium text-blue-700">Didn''t receive the email?</p>
+            <p className="text-sm font-medium text-blue-700">Didn&apos;t receive the email?</p>
             <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-blue-600">
               <li>Check your spam or junk folder</li>
               <li>Make sure you entered the correct email address</li>

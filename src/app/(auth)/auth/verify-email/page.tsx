@@ -63,7 +63,7 @@ function VerifyEmailInner() {
         setTimeout(() => {
           router.push(`/auth/login?email=${encodeURIComponent(email)}`);
         }, 2000);
-      } catch (error) {
+      } catch {
         setState({
           status: "error",
           message: "An error occurred. Please try again.",
