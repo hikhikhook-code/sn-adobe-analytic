@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { Suspense, useState } from "react";
 import Link from "next/link";
@@ -18,7 +18,6 @@ import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 
 interface FormError {
   message: string;
-  /** When set, the register form shows a follow-up link (e.g. to /auth/login). */
   action?: { href: string; label: string };
 }
 
@@ -27,8 +26,8 @@ function RegisterInner() {
   const sp = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<FormError | null>(null);
-  // Allow the login page to prefill the registration email when someone
-  // tried to sign in to an account that doesn't exist.
+  const [success, setSuccess] = useState(false);
+  const [registeredEmail, setRegisteredEmail] = useState("");
   const prefilledEmail = sp.get("email") ?? "";
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -40,8 +39,6 @@ function RegisterInner() {
     const password = String(fd.get("password") ?? "");
     const name = String(fd.get("name") ?? "").trim();
 
-    // Cheap client-side guard so the user gets a clear message instead of
-    // a generic zod "Invalid input" from the API.
     if (!/^\S+@\S+\.\S+$/.test(email)) {
       setError({ message: "Please enter a valid email address." });
       setLoading(false);
@@ -65,7 +62,7 @@ function RegisterInner() {
     } catch {
       setError({
         message:
-          "Couldn't reach the server. Check your connection and try again.",
+          "Couldn''t reach the server. Check your connection and try again.",
       });
       setLoading(false);
       return;
@@ -102,18 +99,46 @@ function RegisterInner() {
       return;
     }
 
-    const result = await signIn("credentials", {
-      email,
-      password,
-      redirect: false,
-    });
+    setSuccess(true);
+    setRegisteredEmail(email);
     setLoading(false);
-    if (result?.error) {
-      router.push("/auth/login");
-      return;
-    }
-    router.push("/dashboard");
-    router.refresh();
+  }
+
+  if (success) {
+    return (
+      <Card>
+        <CardHeader className="space-y-1 text-center">
+          <CardTitle className="text-2xl">Check your email</CardTitle>
+          <CardDescription>
+            We''ve sent a verification link to your inbox
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="rounded-md bg-green-50 px-4 py-3 text-center">
+            <p className="text-sm font-medium text-green-700">
+              Account created successfully!
+            </p>
+            <p className="mt-1 text-sm text-green-600">
+              Please check your email at <strong>{registeredEmail}</strong> and
+              click the verification link to complete your registration.
+            </p>
+          </div>
+
+          <div className="space-y-2 rounded-md bg-blue-50 px-4 py-3">
+            <p className="text-sm font-medium text-blue-700">Didn''t receive the email?</p>
+            <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-blue-600">
+              <li>Check your spam or junk folder</li>
+              <li>Make sure you entered the correct email address</li>
+              <li>The link will expire in 24 hours</li>
+            </ul>
+          </div>
+
+          <Button asChild className="w-full">
+            <Link href="/auth/login">Back to login</Link>
+          </Button>
+        </CardContent>
+      </Card>
+    );
   }
 
   return (

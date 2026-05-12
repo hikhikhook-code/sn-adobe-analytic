@@ -1,8 +1,9 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { bootstrapOwnerIfEligible } from "@/lib/owner-bootstrap";
+import { sendVerificationEmail } from "@/lib/email-verification";
 
 const RegisterSchema = z.object({
   name: z.string().min(1).max(80).optional(),
@@ -29,8 +30,6 @@ export async function POST(req: Request) {
     where: { email: email.toLowerCase() },
   });
   if (existing) {
-    // Structured error so the UI can show a friendlier message with a
-    // "Sign in" link instead of just surfacing the raw string.
     return NextResponse.json(
       {
         error: "That email is already registered. Try signing in instead.",
@@ -49,17 +48,28 @@ export async function POST(req: Request) {
     select: { id: true, email: true, name: true },
   });
 
-  // PR #18: eager owner-access bootstrap on register. Covers the case
-  // where the operator whitelisted their email in OWNER_EMAILS and
-  // then registered fresh — they become OWNER at account creation,
-  // not only after a subsequent sign-in event. Non-blocking: bootstrap
-  // failures must never 500 the register response.
+  // Send verification email
+  try {
+    await sendVerificationEmail(user.email, user.name);
+  } catch (error) {
+    console.error("Failed to send verification email:", error);
+    // Non-blocking: email send failure should not prevent registration
+    // but we should log it for debugging
+  }
+
+  // PR #18: eager owner-access bootstrap on register
   try {
     await bootstrapOwnerIfEligible(user.id, user.email);
   } catch {
     // Intentionally swallowed. The lazy bootstrap in
-    // getSessionEntitlements will retry on the user's next request.
+    // getSessionEntitlements will retry on the user''s next request.
   }
 
-  return NextResponse.json({ user }, { status: 201 });
+  return NextResponse.json(
+    {
+      user,
+      message: "Account created. Please check your email to verify your address.",
+    },
+    { status: 201 },
+  );
 }
