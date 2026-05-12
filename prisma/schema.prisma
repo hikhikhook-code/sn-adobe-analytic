@@ -27,9 +27,14 @@ generator client {
 }
 
 datasource db {
+<<<<<<< HEAD
   provider  = "postgresql"
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
+=======
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+>>>>>>> feature/official-adobe-provider
 }
 
 model User {
@@ -484,3 +489,5 @@ model ImportedAsset {
   @@index([datasetId])
   @@index([contributorName])
 }
+
+

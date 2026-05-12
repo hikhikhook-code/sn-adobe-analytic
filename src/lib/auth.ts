@@ -1,4 +1,4 @@
-import type { NextAuthOptions } from "next-auth";
+﻿import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
 import bcrypt from "bcryptjs";
@@ -7,14 +7,6 @@ import { prisma } from "@/lib/prisma";
 import { assertNextAuthSecret } from "@/lib/env";
 import { bootstrapOwnerIfEligible } from "@/lib/owner-bootstrap";
 
-/**
- * Whether Google OAuth is wired for this deployment.
- *
- * Must be evaluated at module load, NOT inside `authorize`/`callbacks`, so
- * the sign-in page can import it as a pure client-safe boolean (see the
- * separate `auth-client.ts` re-export) and render its Google button in
- * the correct enabled/disabled state without round-tripping to the server.
- */
 export const GOOGLE_OAUTH_ENABLED = Boolean(
   process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
 );
@@ -33,6 +25,12 @@ const providers: NextAuthOptions["providers"] = [
         where: { email: creds.email.toLowerCase() },
       });
       if (!user || !user.hashedPassword) return null;
+      
+      // Check if email is verified
+      if (!user.emailVerified) {
+        throw new Error("Please verify your email before signing in.");
+      }
+      
       const ok = await bcrypt.compare(creds.password, user.hashedPassword);
       if (!ok) return null;
       return {
@@ -50,16 +48,6 @@ if (GOOGLE_OAUTH_ENABLED) {
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-      // `allowDangerousEmailAccountLinking` keeps NextAuth from throwing
-      // `OAuthAccountNotLinked` the first time a user who already has a
-      // credentials-based account tries to sign in with Google using the
-      // same email. We still match purely on verified Google email, which
-      // is safe because Google returns `email_verified: true` for any
-      // account that reached the OAuth consent screen. If a deployment
-      // wants stricter linking semantics (e.g. require the user to first
-      // confirm the link from their account settings) they can flip this
-      // off; for the current single-app MVP the PRD asks for "sign in
-      // with Google" to Just Work.
       allowDangerousEmailAccountLinking: true,
     }),
   );
@@ -72,20 +60,10 @@ export const authOptions: NextAuthOptions = {
     signIn: "/auth/login",
   },
   events: {
-    // Best-effort device logging. Runs after every successful sign-in
-    // (credentials OR Google) and after every new session issuance. We
-    // don't throw here — PR #16 is foundation only, so a logging failure
-    // must never block a user from signing in. The eventual device-limit
-    // enforcement PR will layer a `signIn` callback on top that rejects
-    // the attempt when the user is already at their plan's device cap.
     async signIn({ user }) {
       const userId = (user as { id?: string }).id;
       if (!userId) return;
       try {
-        // We don't have the raw Request here (NextAuth events don't
-        // surface headers), so we stamp a generic "Recent sign-in"
-        // device row. The credentials-register path + the
-        // `/api/devices/register` client route provide richer info.
         const deviceId = randomBytes(12).toString("hex");
         await prisma.device.create({
           data: {
@@ -98,16 +76,9 @@ export const authOptions: NextAuthOptions = {
           },
         });
       } catch {
-        // Swallow — device logging must not break sign-in.
+        // Swallow ƒ?" device logging must not break sign-in.
       }
 
-      // PR #18: eager owner-access bootstrap. If this user's email is
-      // on OWNER_EMAILS, promote their DB role to OWNER and stamp
-      // `ownerAccessGrantedAt` / `ownerAccessSource = "env_bootstrap"`.
-      // The helper is idempotent and swallows its own DB errors; a
-      // lazy version of the same call also runs on every gated
-      // request via `getSessionEntitlements`, so if this fails the
-      // user still gets promoted on their next request.
       try {
         const email = (user as { email?: string | null }).email ?? null;
         await bootstrapOwnerIfEligible(userId, email);
@@ -130,9 +101,5 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  // `assertNextAuthSecret` throws in strict production runtime if the secret
-  // is missing, placeholder, CI-only, or too short. In dev / build phase it
-  // warns and returns a fallback so local setup and CI stay frictionless.
-  // See src/lib/env.ts for the full policy.
   secret: assertNextAuthSecret(),
 };
